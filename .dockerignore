@@ -1,0 +1,7 @@
+.git
+.git/*
+*.rdb
+*.log
+*.json
+@notes
+ratchet

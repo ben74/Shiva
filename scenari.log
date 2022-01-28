@@ -1,0 +1,32 @@
+hermes;pkill -9 -f php;pkill -9 -f tail;echo ''>3.log;tail -f 3.log & php shiva.php del && php shiva.php 2000 &
+sleep 10
+php ex/aliceToBob.php 2000 bob pass alice helloFromBob token & php ex/aliceToBob.php 2000 alice wolf abob greetingsFromAlice &
+=====
+C:98000:bob:["ex/aliceToBob.php","2000","bob","pass","alice","helloFromBob","token"]
+C:98001:alice:["ex/aliceToBob.php","2000","alice","wolf","bob","greetingsFromAlice"]
+S:97984:connect
+S:97985:connect
+S:97984:S:97984:connection open: 1
+C:98000:bob:welcom{"pid":97984,"id":1}
+S:97985:S:97985:connection open: 2
+C:98001:alice:welcom{"pid":97985,"id":2}
+S:97985:S:97985 --query from 2: {"get":"time"}
+S:97984:S:97984 --query from 1: {"get":"time"}
+C:98001:alice::notMsg:18        {"get":"time"} => 1636798298
+C:98000:bob::notMsg:18  {"get":"time"} => 1636798298
+S:97984:S:97984 --query from 1: {"token":"10dd95498a88474cb2907417d3eb02b501574ec881060154dd09c136fc1d9c88"}
+C:98000:bob::notMsg:o8  {"token":"10dd95498a88474cb2907417d3eb02b501574ec881060154dd09c136fc1d9c88"} => ok:298
+S:97985:S:97985 --query from 2: {"user":"alice","pass":"wolf"}
+C:98001:alice::notMsg:o6        {"user":"alice","pass":"wolf"} => ok:286
+S:97985:S:97985 --query from 2: {"iam":"alice"}
+S:97984:S:97984 --query from 1: {"iam":"bob"}
+S:97984:S:97984 --query from 1: {"sendto":"alice","message":"helloFromBob"}
+alice>helloFromBob
+S:97985:S:97985 --query from 2: {"sendto":"bob","message":"greetingsFromAlice"}
+bob>greetingsFromAlice
+C:98001:alice:Consuming:helloFromBob
+C:98000:bob::notMsg:o8  {"sendto":"alice","message":"helloFromBob"} => ok:398
+C:98001:alice:Ok=>0.0068159103393555=>welcome  == > {"pid":97985,"id":2}        {"get":"time"}  == > 1636798298 {"user":"alice","pass":"wolf"}  == > ok:286     {"iam":"alice"}  == > {"iam":"alice","pid":97985,"fd":2}     {"sendto":"bob","message":"greetingsFromAlice"}  == > {"sendto":"alice","message":"helloFromBob"}
+C:98000:bob:Ok=>0.0076930522918701=>welcome  == > {"pid":97984,"id":1}  {"get":"time"}  == > 1636798298 {"token":"10dd95498a88474cb2907417d3eb02b501574ec881060154dd09c136fc1d9c88"}  == > ok:298       {"iam":"bob"}  == > {"iam":"bob","pid":97984,"fd":1} {"sendto":"alice","message":"helloFromBob"}  == > ok:398
+S:97984:S:97984:connection close: 1
+S:97985:S:97985:connection close: 2
