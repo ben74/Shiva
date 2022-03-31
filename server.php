@@ -6,3 +6,5 @@ $server->on('Request', function($request, $response)
 });
 
 $server->start();
+?>
+Library/Application Support/JetBrains/PhpStorm2020.3/consoles/db/e1ceface-da14-440b-9252-44c13247b105/triggers.sql

@@ -4,6 +4,13 @@
 /*
 a: partager une table : références
 b:
+
+Todo ; each consumer has an Atomic Bitwise :
+1: free to receive
+2: ready to be recycled
+4: chan1
+8: chan 2 etc
+Algo de tri ($val%$channel)===$channel && ($val % 2 ===1 )
  */
 try {
     chdir(__DIR__);
