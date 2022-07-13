@@ -1,10 +1,11 @@
 #   hermes;x='alptech/yuzu:shiva';docker build --no-cache -t $x -f shiva.dockerfile .;docker push $x;say pushed;
 FROM php:7.4-fpm-alpine
-RUN apk -U add findutils procps redis bash curl libstdc++ && docker-php-ext-install sockets && docker-php-ext-install pcntl && docker-php-ext-install pdo_mysql
-RUN apk add gcc make g++ autoconf linux-headers libevent libevent-dev openssl-dev curl-dev\
+RUN apk -U add findutils procps redis bash curl libstdc++ && apk add gcc make g++ autoconf linux-headers libevent libevent-dev openssl-dev curl-dev ${PHPIZE_DEPS} \
+    && docker-php-ext-install sockets && docker-php-ext-install pcntl && docker-php-ext-install pdo_mysql\
     && yes '' | pecl install redis \
     && yes '' | pecl install -D 'enable-sockets="yes" enable-openssl="yes" enable-http2="yes" enable-mysqlnd="yes" enable-swoole-json="yes" enable-swoole-curl="yes" enable-cares="yes"' openswoole \
-    && apk del gcc make g++ autoconf linux-headers libevent libevent-dev openssl-dev curl-dev
+    && curl -sS https://getcomposer.org/installer | php && mv composer.phar /usr/bin/composer && pecl install mongodb && yes | composer require mongodb/mongodb \
+    && apk del gcc make g++ autoconf linux-headers libevent libevent-dev openssl-dev curl-dev ${PHPIZE_DEPS}
 #--no-cache --virtual .build-deps #FROM 123Mo to 49.27 MB
 #RUN yes no | pecl install ev && yes "" | pecl install event
 #RUN apk del --no-network .build-deps
