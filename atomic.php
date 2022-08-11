@@ -1,7 +1,18 @@
-<?php // php  -dxdebug.start_with_request=1 atomic.php;  #curl 127.0.0.1:9501
-// swoole use multiple atomics, channels and tables across workers ( in order not to use redis )
-// Si la référence est crée avant alors elle est partagée, sinon elle ne l'est pas !
-/*
+<?php /*
+Is not using websockets, std http here
+pkill -9 -f atomic;bf;cd Shiva;php -dxdebug.start_with_request=1 atomic.php;  #curl 127.0.0.1:9501
+
+export taskWorkers=2;export subPerChannel=200;
+ while IFS== read key value;do printf -v "$key" "$value";done < <(jq -r 'to_entries|map("\(.key)=\(.value|tostring)")|.[]' $bf/ben/json.dat)
+
+
+touch atomic.php.kill;kill -9 $pid1;kill -9 $pid2;pkill -9 -f curl;         pkill -9 -f atomic;  rm atomic.php.kill;echo ''>atomic.log;tail -f atomic.log & php -dxdebug.start_with_request=1 -dxdebug.mode=on atomic.php 1 1 &
+( i=0;while true;do while [ $i -gt 25 ]; do i=$(ps -ax | grep curlpush | grep -v grep | wc -l ); if  [ $i -gt 25 ]; then sleep 1;fi; done; let "i=i+1";curl -ks 'http://127.0.0.1:9501/?a=p&c=kitchen&curlpushatomic' >/dev/null &  done; ) & pid1=$!
+( i=0;while true;do while [ $i -gt 25 ]; do  i=$(ps -ax | grep curlpush | grep -v grep | wc -l ); if  [ $i -gt 25 ]; then sleep 1;fi; done; let "i=i+1";curl -ks 'http://127.0.0.1:9501/?a=c&c=kitchen&curlconsatomic' >/dev/null &  done; ) & pid2=$!
+
+Swoole use multiple atomics, channels and tables across workers ( in order not to use redis )
+Si la référence est crée avant alors elle est partagée, sinon elle ne l'est pas !
+
 a: partager une table : références
 b:
 
@@ -11,6 +22,11 @@ Todo ; each consumer has an Atomic Bitwise :
 4: chan1
 8: chan 2 etc
 Algo de tri ($val%$channel)===$channel && ($val % 2 ===1 )
+
+on SIGTERM export current queues to json on volume then die && kill pod && new one availables slots ++
+and connected clients will reconnect to current instance on a REPL basic ( waiting for keyword input or enter to get or publish message )
+
+- Atomic for avaible connection channel ( recycling previous aborted killed connections )
  */
 try {
     chdir(__DIR__);
@@ -19,16 +35,18 @@ try {
     $starts = microtime(true);
     $reakNum = $argv[1];
     $nbWorkers = $argv[2];
-    $taskWorkers = 2;
-    $capacityMessagesPerChannel = 90;
+    $taskWorkers = $_ENV['taskWorkers'] ?? 2;
+    $nbChannels = $_ENV['nbChannels'] ?? 30;
+    $nbAtomics = $_ENV['nbAtomics'] ?? 100;
+    $capacityMessagesPerChannel = $_ENV['chanCap'] ?? 90;
+    $maxSuscribersPerChannel = $_ENV['subPerChannel'] ?? 200;
     $port = 9501;
-    $nbChannels = 30;
-    $nbAtomics = 100;
+
     $binSize = strlen(bindec(max($nbChannels, $nbAtomics)));
     $nbReferences = $nbAtomics + $nbChannels;
 
     if (0) {
-// Installation des gestionnaires de signaux -- Swoole overrides them
+// Installation des gestionnaires de signaux -- as Swoole overrides them all
         pcntl_async_signals(true);
         pcntl_signal(SIGTERM, 'sig');
         pcntl_signal(SIGHUP, 'sig');
@@ -38,39 +56,51 @@ try {
         shutdown('shutdown function');
     });
 
-    $_ENV['atomics'] = ['received' => new Swoole\Atomic(), 'process:server' => new Swoole\Atomic(), 'process:manager' => new Swoole\Atomic()];
-    $_ENV['tables'] = $_ENV['channels'] = $_ENV['workerAtomics'] = [];
-    $i = 0;
-    while ($i < $nbChannels) {
-        $_ENV['channels'][$i] = new Swoole\Coroutine\Channel($capacityMessagesPerChannel);
-        $i++;
-    }
-    $i = 0;
-    while ($i < $nbAtomics) {
-        $_ENV['atomics'][$i] = new Swoole\Atomic();
-        $i++;
-    }
-    $i = 0;
-    while ($i < $nbWorkers) {
-        $_ENV['workerAtomics'][$i] = new Swoole\Atomic();
-        $i++;
-    }
+    if ('prédéfinitions && références au stockage mémoire partagé du process parent') {
+
+        $_ENV['atomics'] = ['received' => new Swoole\Atomic(), 'process:server' => new Swoole\Atomic(), 'process:manager' => new Swoole\Atomic()];
+        $_ENV['tables'] = $_ENV['channels'] = $_ENV['workerAtomics'] = [];
 
 
-    $_ENV['rkv'] = new Swoole\Table($nbReferences);
-    $_ENV['rkv']->column('v', Swoole\Table::TYPE_STRING, 9000);
-    $_ENV['rkv']->create();
-    $_ENV['rkv']->set('freeChannels', ['v' => json_encode(range(0, $nbChannels - 1))]);
-    $_ENV['rkv']->set('freeAtomics', ['v' => json_encode(range(2, $nbAtomics - 1))]);
-    $fc = json_encode(range(0, $nbWorkers - 1));
-    _e("\n" . __line__ . '::' . $fc);
-    $_ENV['rkv']->set('freeAtomicsWorkers', ['v' => $fc]);
+        $_ENV['rkv'] = new Swoole\Table($nbReferences);
+        $_ENV['rkv']->column('v', Swoole\Table::TYPE_STRING, 9000);
+        $_ENV['rkv']->create();
+        if (1) {
+            // is an array
+            $_ENV['rkv']->set('freeChannels', ['v' => json_encode(range(0, $nbChannels - 1))]);
+            $_ENV['rkv']->set('freeAtomics', ['v' => json_encode(range(2, $nbAtomics - 1))]);
+            $fc = json_encode(range(0, $nbWorkers - 1));
+            _e("\n" . __line__ . '::' . $fc);
+            $_ENV['rkv']->set('freeAtomicsWorkers', ['v' => $fc]);
 
-    $_ENV['ref'] = new Swoole\Table($nbReferences);
+
+
+            $i = 0;
+            while ($i < $nbChannels) {
+                $_ENV['channels'][$i] = new Swoole\Coroutine\Channel($capacityMessagesPerChannel);
+                $_ENV['rkv']->set('subscribersPerChannel:'.$i, ['v' => '[]']);
+                //$_ENV['subcriberPerChannel'][$i] = new Swoole\Coroutine\Channel($maxSuscribersPerChannel); // push && pop only ...
+                $i++;
+            }
+            $i = 0;
+            while ($i < $nbAtomics) {
+                $_ENV['atomics'][$i] = new Swoole\Atomic();
+                $i++;
+            }
+            $i = 0;
+            while ($i < $nbWorkers) {
+                $_ENV['workerAtomics'][$i] = new Swoole\Atomic();
+                $i++;
+            }
+
+
+        }
+
+        $_ENV['ref'] = new Swoole\Table($nbReferences);
 //$_ENV['ref']->column('e', Swoole\Table::TYPE_STRING, 1);// a:atomic,c:channel
-    $_ENV['ref']->column('v', Swoole\Table::TYPE_INT, $binSize);// 8:256 values
-    $_ENV['ref']->create();
-
+        $_ENV['ref']->column('v', Swoole\Table::TYPE_INT, $binSize);// 8:256 values
+        $_ENV['ref']->create();
+    }
 
 // php -dxdebug.start_with_request=1. atomic.php;
 
@@ -87,6 +117,7 @@ try {
     $serv->on('finish', function ($server, $task_id, $reactorId, $data) {
         _e("\n" . __line__ . ':');
     });
+
     $serv->on('workerstart', function ($server, $workerId) {
         _e("\nWS:" . __line__ . ':' . $workerId . ':' . getMyPid());
         $atomicName = 'w:' . getMyPid();
@@ -105,9 +136,10 @@ try {
         }
         $_ENV['atomics'][0]->add(1);
         $_ENV['atomics'][1]->add(1);
+
         $g = $_ENV['atomics'][1]->get();
         $g2 = $_ENV['atomics'][0]->get();
-        echo ':inc:' . $g . ':' . $g2;
+        echo "\nWS:inc:" . $g . ':' . $g2;
     });
 
     $serv->on('workerstop', function ($server, $workerId) {
@@ -160,6 +192,14 @@ try {
     });
 
     $serv->on('stop', function () {
+        // Todo: exporter   $_ENV['ref'] vers un volume et envoyer fuckoff à chacun des clients
+        $a = json_encode($_ENV['ref']);
+        $b = [];
+        foreach ($_ENV['ref'] as $k => $v) {
+            $b[$k] = $v;
+        }
+        file_put_contents('swoole.dump.json', json_encode($b));
+
         _e("\n" . __line__ . ':');
         shutdown('serveronstop');
     });
@@ -177,14 +217,13 @@ try {
     $serv->on('request', function ($request, $response) use ($starts) {
         //_e("\n" . __line__);
         $a = $request->get['a'];
+        $channelName = $request->get['c'] ?? 'c:cooking';// Todo : per priority, each consumer might suscribe to different channels
         //_e("\nRequest:has:" . __line__ . ':' . $a);
 
         $response->header('Content-Type', 'text/plain');
         //$response->end('.' . __line__ . ":$a\n");
         if (1) {
             //return;
-
-
             $atomicName = 'a:oddEven';
             if (!$_ENV['ref']->exists($atomicName)) {
                 $fc = rkg('freeAtomics');
@@ -193,17 +232,17 @@ try {
                 echo "\n" . __line__ . ':' . getMyPid() . ':setAtomic';
                 //$now = rkg('freeAtomics');
             }
-            $channelName = 'c:cooking';
+
             if (!$_ENV['ref']->exists($channelName)) {
                 $fc = rkg('freeChannels');
-                REFS($channelName, array_shift($fc));
+                REFS($channelName, array_shift($fc));// Attribution à un Atomic
                 RKS('freeChannels', $fc);
                 echo "\n" . __line__ . ':' . getMyPid() . ':setChannel';
                 //$now = rkg('freeChannels');
             }
             $atomicId = refg($atomicName);
-            $atomic = $_ENV['atomics'][$atomicId];
             $channelId = refg($channelName);
+            $atomic = $_ENV['atomics'][$atomicId];
             $channel = $_ENV['channels'][$channelId];
             $oddEven = $atomic->get();//Odd or even
             $atomic->add();
@@ -219,13 +258,17 @@ try {
                 $x = "\n" . $_ENV['atomics']['received']->get() . ' messages in ' . microtime(true) - $starts;
                 _e($x);
                 $response->end($x);
-            } elseif ($a == 'p') {
+            } elseif ($c && $a == 's' and 'susbcribe to channel') {
+                //$_ENV['rkv']->set('subscribersPerChannel:'.$i, ['v' => '[]']);
+            } elseif ($c && $a == 'us' and 'susbcribe to channel') {
+                //$_ENV['rkv']->set('subscribersPerChannel:'.$i, ['v' => '[]']);
+            } elseif ($a == 'p' and 'push to queue') {
                 $msg = microtime(true);
                 _e("\n" . __line__ . ':' . getMyPid() . ':pushes ' . $channelName . ' ' . $msg);
                 $channel->push($msg);
                 $response->end('.' . __line__);
                 //$serv->send($fd, '.' . __line__);
-            } elseif ($a == 'c') {
+            } elseif ($a == 'c' and 'consumes per channel') {
                 $msg = $channel->pop();
                 _e("\n" . __line__ . ':' . getMyPid() . ':consumes ' . $channelName . ' ' . $msg);
                 $response->end('.' . __line__);
@@ -235,7 +278,7 @@ try {
             }
         }
     });
-    //*/
+//*/
 //Swoole\Server::start(): require onReceive callback
     $serv->on('receive', function ($serv, $fd, $reactorId, $data) use ($starts) {// Pour un server standard parser
         $_ENV['atomics']['received']->add();
@@ -406,10 +449,9 @@ php -dxdebug.start_with_request=1 atomic.php;
 # SALVE de 25 puis test et sleep
 
 
-touch atomic.php.kill;kill -9 $pid1;kill -9 $pid2;pkill -9 -f curl;         pkill -9 -f atomic;  rm atomic.php.kill;echo ''>atomic.log;      php -dxdebug.mode=off atomic.php 1 1 &
+touch atomic.php.kill;kill -9 $pid1;kill -9 $pid2;pkill -9 -f curl;         pkill -9 -f atomic;  rm atomic.php.kill;echo ''>atomic.log;tail -f atomic.log & php -dxdebug.mode=off atomic.php 1 1 &
 ( i=0;while true;do while [ $i -gt 25 ]; do i=$(ps -ax | grep curlpush | grep -v grep | wc -l ); if  [ $i -gt 25 ]; then sleep 1;fi; done; let "i=i+1";curl -ks 'http://127.0.0.1:9501/?a=p&curlpushatomic' >/dev/null &  done; ) & pid1=$!
 ( i=0;while true;do while [ $i -gt 25 ]; do  i=$(ps -ax | grep curlpush | grep -v grep | wc -l ); if  [ $i -gt 25 ]; then sleep 1;fi; done; let "i=i+1";curl -ks 'http://127.0.0.1:9501/?a=c&curlconsatomic' >/dev/null &  done; ) & pid2=$!
-tail -f atomic.log
 
 
 curl 'http://127.0.0.1:9501/?a=total'
