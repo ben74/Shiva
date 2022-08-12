@@ -234,16 +234,19 @@ try {
             }
 
             if (!$_ENV['ref']->exists($channelName)) {
+                // refs('c:'.$chanName,$_ENV['atomics']['occupiedChannels']);$_ENV['atomics']['occupiedChannels']++;//connectedConsumers++// mess per channel= $_ENV['channels'][$i]->length()
                 $fc = rkg('freeChannels');
                 REFS($channelName, array_shift($fc));// Attribution à un Atomic
                 RKS('freeChannels', $fc);
                 echo "\n" . __line__ . ':' . getMyPid() . ':setChannel';
                 //$now = rkg('freeChannels');
             }
-            $atomicId = refg($atomicName);
             $channelId = refg($channelName);
-            $atomic = $_ENV['atomics'][$atomicId];
             $channel = $_ENV['channels'][$channelId];
+
+            $atomicId = refg($atomicName);
+            $atomic = $_ENV['atomics'][$atomicId];
+
             $oddEven = $atomic->get();//Odd or even
             $atomic->add();
 
