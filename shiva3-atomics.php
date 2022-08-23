@@ -14,8 +14,15 @@ Chaque worker est responsable de la rétention de ses propres messages, hormis p
 
 1155/1822 : bateaux menthon stb after sunset over the horizon
 1161/1822 : clocher de poros
+
+Car simplicité du système, si un worker -> référence mémoire php directe
  */
-$listTableNb=900;$listTableNbMaxSize=9000;// participants, suscribers, free, pending: => intercepted to channel on rpush
+$maxConn = $backlog = 12000;
+$tick = 20000000;//tick each 20 sec
+
+
+$listTableNb = 900;
+$swooleTableStringMaxSize = $listTableNbMaxSize = 9000;// participants, suscribers, free, pending: => intercepted to channel on rpush
 
 
 $pvc = $salt = '';
@@ -24,7 +31,7 @@ $p = 2000;
 $dmi = 'YmdHi';
 $timerMs = 1000;
 $redisPort = 6379;
-$maxConn = $backlog = 12000;
+
 $redisIp = '127.0.0.1';
 $reaktors = $workers = 1;
 $pass = ['bob' => 'pass', 'alice' => 'wolf'];
@@ -35,11 +42,8 @@ $taskWorkers = 2;//$_ENV['taskWorkers'] ?? 2;
 $nbChannels = 30;//$_ENV['nbChannels'] ?? 30;
 $nbAtomics = 0;// non nécessaires ici //$_ENV['nbAtomics'] ?? 100;
 $binSize = strlen(bindec(max($nbChannels, $nbAtomics)));
-
-$swooleTableStringMaxSize = 9000;
 $capacityMessagesPerChannel = 90;//$_ENV['chanCap'] ?? 90;
 $maxSuscribersPerChannel = 200;//$_ENV['subPerChannel'] ?? 200;
-$tick = 20000000;//tick each 20 sec
 $_ENV['gt'] = [];
 
 
@@ -79,12 +83,12 @@ if (1 or 'default overridable configuration') {//        //
 }
 
 if (1) {
-    $tokenHashFun = function ($user, $pass)use($dmi,$salt) {
+    $tokenHashFun = function ($user, $pass) use ($dmi, $salt) {
         return hash('sha256', $user . date($dmi) . $salt . $pass);
     };
 
-    $rea = ceil($reaktors);#(swoole_cpu_num() * $reaktors);
-    $wor = ceil($workers);#(swoole_cpu_num() * $workers);
+    $rea = ceil($reaktors); //(swoole_cpu_num() * $reaktors);
+    $wor = ceil($workers);  //(swoole_cpu_num() * $workers);
     if ($wor < $rea) $wor = $rea;
     echo "\nMaster:" . \getmypid() . ":Rea:$rea,wor:$wor";
     $options = [//  https://www.swoole.co.uk/docs/modules/swoole-server/configuration
@@ -106,6 +110,8 @@ if (1) {
         'max_connection' => $maxConn,// Max active connections - limited to ulimit -n : 256
         // 'tcp_defer_accept'=>1,// sec
     ];
+    //$options = ['reactor_num' =>1,'worker_num' =>1];// No options : all scenarios ok :)
+    echo"\n".time().'-'.json_encode($options);
 }
 
 chdir(__dir__);
@@ -126,6 +132,7 @@ class wsServer
 
     function db($x, $level = 9, $minLogLevel = 1)
     {
+        return;
         if ($level > 98) ;
         elseif (!$this->log) return;
         elseif ($level < $minLogLevel) return;
@@ -133,34 +140,56 @@ class wsServer
         file_put_contents('3.log', "\nS:" . \getmypid() . ':' . $x, 8);
     }
 
-    function processPendingInBackground($via = 0)
+    function processNbPendingInBackground($via = 0)
     {
         global $pvc;
         if ($this->bgProcessing) {
-            $this->r()->incr('bgp', 1);
+            $this->r()->incr('nbBgpLocks', 1);
             return;
         }
-        $free = $this->frees;
+
+        $this->bgProcessing = $now = time();
+        if( $this->r()->get('lastBackup') < ($now - $_ENV['timeToBackup']) ){
+            $this->r()->set('lastBackup',$now);
+            $x = $this->r()->dump();
+            foreach($x as $k=>&$v){if(substr($k,0,4)=='pid2')$v=null;}unset($v); $x=array_filter($x);
+            if(!$x['free'])$x['free']=[];
+            $x['Amem']=memory_get_usage();
+            $x['nbFree']=count($x['free']);
+            $x['time']=$_ENV['gt'];
+            unset($x['participants'],$x['p2h'],$x['sentAsapToFd'],$x['messagesSentToFdOnBackground']);//dont care ... no care,
+            file_put_contents('backup.json',json_encode($x));
+
+        }
+        $this->bgProcessing = false;
+
+        $free = $this->r()->get('free');//frees;
         if (!$free) {
             return;
         }
+        if(!$this->r()->get('nbPending')){
+            return;
+        }
 
-        ////$this->db('pg', 1);
-        $this->r()->incr('bg', 1);
-        $this->bgProcessing = true;
+        $this->bgProcessing = $now;
+        $this->r()->incr('nbBgProcessing');
+
+        //  $this->db('pg', 1);
+        //  echo "\nBgProcessFree:".count($free).'/pen'.$this->r()->get('nbPending');
 
         foreach ($free as $fd) {
-            if (isset($this->fd2sub[$fd]) and $this->fd2sub[$fd]) {
+            if (isset($this->fd2sub[$fd]) and $this->fd2sub[$fd]) {// channel souscrit par chacun des processus libres ...
                 foreach ($this->fd2sub[$fd] as $sub) {
                     $m = false;
                     if ($this->r()->exists('pending:' . $sub) and ($this->r()->LLEN('pending:' . $sub)) and ($m = $this->r()->lPop('pending:' . $sub)) and $m) {
+                        $a = 'message poped :)';
                     } elseif ($this->r()->hExists('p2d', $sub) and $this->r()->hget('p2d', $sub)) {// Too much memory pressure then ...
                         $this->r()->HINCRBY('p2d', $sub, -1);
                         $x = glob($pvc . $sub . '/*.msg');
                         if ($x) {
                             $x = reset($x);
                             $m = file_get_contents($x);
-                            $this->r()->decr('p2disk');
+                            $this->r()->decr('nbMessages2disk');
                             unlink($x);
                             $this->db($x, 1);
                         }
@@ -169,24 +198,26 @@ class wsServer
                         $this->busy($this->pid . ',' . $fd, $fd);
                         $this->r()->HINCRBY('pendings', $sub, -1);
                         $this->send($fd, json_encode(['queue' => $sub, 'message' => $m]), 'async');
-                        $this->r()->HINCRBY('p2h', $fd, 1);
-                        $nbSent = $this->r()->hget('p2h', $fd);
+                        $this->r()->HINCRBY('messagesSentToFdOnBackground', $fd, 1);
+                        $nbSent = $this->r()->hget('messagesSentToFdOnBackground', $fd);
                         if ($nbSent > 1) {
                             $this->db(implode(' ;; ', $this->frees) . ' >> ' . $fd);
                         }
-                        $this->r()->incr('sAsyncOk');
-                        $this->r()->decr('sPending');
+                        $this->r()->incr('nbBgSent');
+                        $this->r()->decr('nbPending');
                         $this->db('free: ' . $fd . " $sub receives :" . $m, 1);
                         break;// Cuz not free anymore
+                    }else{
+                        $this->r()->incr('nbNoMessageToPop');
                     }
                 }
             }
         }
-        $this->bgProcessing = false;
+        $this->bgProcessing = false;// Todo :: Each individual worker shall care of it's own pending queues
         return;
     }
 
-    public function __construct($p, $options, $needAuth = false, $tokenHashFun = null, $passwords = [], $log = false, $timer = 1000)
+    public function __construct($p, $options, $needAuth = false, $tokenHashFun = null, $passwords = [], $log = false, $timer = 2000)
     {
         global $tick;
         $this->tick = $tick;
@@ -227,14 +258,14 @@ class wsServer
     {
         $this->frees = array_diff($this->frees, [$fd]);//Sur lui même, si c'est le cas
         $this->rem('free', $him);
-        $this->r()->incr('busy', 1);
+        $this->r()->incr('nbBusied', 1);
     }
 
     function free($him, $fd)
     {
         $this->frees[] = $fd;
         $this->add('free', $him);
-        $this->r()->incr('freed', 1);
+        $this->r()->incr('nbFreed', 1);
     }
 
     function checkUserPass($user, $pass)
@@ -276,18 +307,24 @@ class wsServer
             }
             $this->db('sentto:' . $fd);
         }
-        $this->r()->incr('sSend');
+        $this->r()->incr('nbSend');
         return;
     }
 
-    function rep($sender,$frame){
+    function rep($sender, $frame)
+    {
         $this->send($sender, $frame->data . ':' . hash('crc32c', $frame->data));
+    }
+
+    function handshake($server, $frame)
+    {
+
     }
 
     function onMessage($server, $frame)
     {
         global $maxMemUsageMsgToDisk, $pvc;
-        $this->r()->incr('SonMessage');
+        $this->r()->incr('nbMessages');
         $sender = $frame->fd;
         $himself = $this->pid . ',' . $sender;
         $this->db("query from {$sender}: {$frame->data}", 1);
@@ -298,6 +335,11 @@ class wsServer
                 $this->send($sender, json_encode(['err' => 'not valid json payload']));
                 return;
             }
+            if (isset($j['debug'])) {
+                $a = $_ENV['__a'];
+                $this->send($sender, time());
+                return;
+            }
             if (isset($j['get'])) {
                 if ($j['get'] == 'time') {
                     $this->send($sender, time());
@@ -305,6 +347,7 @@ class wsServer
                 }
             }
             if (isset($j['keepalive'])) {// do nothing : argon, neon, krypton, inerte
+                //echo"\nargon";
                 return;
             }
             if (isset($j['user']) and isset($j['pass'])) {
@@ -341,8 +384,12 @@ class wsServer
 
             if (isset($j['dump'])) {
                 $x = $this->r()->dump();
-                unset($x['participants']);
-                $this->send($sender, json_encode(['time' => $_ENV['gt'], 'data' => $x]));
+                foreach($x as $k=>&$v){if(substr($k,0,4)=='pid2')$v=null;}unset($v); $x=array_filter($x);
+                $x['Amem']=memory_get_usage();if(!$x['free'])$x['free']=[];
+                $x['nbFree']=count($x['free']);
+                $x['time']=$_ENV['gt'];
+                unset($x['participants'],$x['p2h'],$x['sentAsapToFd'],$x['messagesSentToFdOnBackground']);//dont care ... no care,
+                $this->send($sender, json_encode($x));
                 return;
             }
             if (isset($j['rk'])) {
@@ -411,19 +458,20 @@ class wsServer
             }
             if (isset($j['broad'])) $j['broadcast'] = $j['broad'];
             if (isset($j['msg'])) $j['message'] = $j['msg'];
-            if (isset($j['sus'])) $j['suscribe'] = $j['sus'];
-            if (isset($j['subscribe'])) $j['suscribe'] = $j['subscribe'];
             if (isset($j['unsubscribe'])) $j['unsuscribe'] = $j['unsubscribe'];
 
+            if (isset($j['sus'])) $j['suscribe'] = $j['sus'];
+            if (isset($j['sub'])) $j['suscribe'] = $j['sub'];
+            if (isset($j['subscribe'])) $j['suscribe'] = $j['subscribe'];
             if (isset($j['suscribe'])) {
-                $this->rep($sender,$frame);
+                $this->rep($sender, $frame);
                 $this->r()->set('lastSub', microtime(true));
                 $this->add('suscribers:' . $j['suscribe'], $this->pid . ',' . $sender);
                 $this->fd2sub[$sender][] = $j['suscribe'];
                 $this->r()->lPush('pid2sub:' . $this->pid . ',' . $sender, $j['suscribe']);
                 return;
             } elseif (isset($j['unsuscribe'])) {
-                $this->rep($sender,$frame);
+                $this->rep($sender, $frame);
                 $this->fd2sub[$sender] = array_diff($this->fd2sub[$sender], [$j['suscribe']]);
                 $this->rem('suscribers:' . $j['unsuscribe'], $this->pid . ',' . $sender);
                 $this->rem('pid2sub:' . $this->pid . ',' . $sender, $j['unsuscribe']);
@@ -444,7 +492,7 @@ class wsServer
                     $this->send($fd, ['sendto' => $j['sendto'], 'message' => $j['message']]);
                     $this->send($sender, 'ok:' . __line__);
                 } elseif (isset($j['push'])) {
-                    $this->r()->incr('sPushed');
+                    $this->r()->incr('nbPushed');
                     $a = 1;
                     $s++;
                     $this->send($sender, hash('crc32c', $j['message']));#aka:ack
@@ -459,18 +507,19 @@ class wsServer
                     }
                     if ($fd) {
                         $this->busy($him, $fd);
-                        $this->r()->incr('sSentAsap');
-                        $this->r()->HINCRBY('p2h', $fd, 1);
+                        $this->r()->incr('nbSentAsap');
+                        $this->r()->HINCRBY('sentAsapToFd', $fd, 1);
                         $this->send($fd, json_encode(['queue' => $j['push'], 'message' => $j['message']]));
                         return;
                     } else {
-                        $this->r()->incr('sPending');
+                        $this->r()->incr('nbPending');
+                        //echo"\nPending++:".$this->r()->get('nbPending');
                         $this->r()->set('lastPending', microtime(true));
                         $this->r()->HINCRBY('pendings', $j['push'], 1);
                         $this->db('new pending msg for ' . $j['push'], 1);// Then todo: en cas de pending upon free event
                         if ($this->r()->get('memUsage') > $maxMemUsageMsgToDisk) {
                             $this->r()->HINCRBY('p2d', $j['push'], 1);
-                            $this->r()->incr('p2disk');
+                            $this->r()->incr('nbMessages2disk');
                             if (!is_dir($j['push'])) mkdir($j['push']);
                             file_put_contents($pvc . $j['push'] . '/' . microtime() . '.msg');
                         } else {
@@ -492,21 +541,25 @@ class wsServer
                 }
             }
 
+            if (isset($j['free'])) {
+                $j['status'] = 'free';
+            }
             if (isset($j['status'])) {
                 $a = 1;
                 if ($j['status'] == 'free') {
-                    $this->rep($sender,$frame);
-                    $sent = $this->shallSend2Free($himself, $sender);
+                    $this->rep($sender, $frame);
+                    $sent = $this->shallSend2Free($himself, $sender);// Sends message to first available consumer and maintains him "busy"
                     if (!$sent) {
                         $this->free($this->pid . ',' . $sender, $sender);
                     }
                     return;
                 } else {//busy
-                    $this->rep($sender,$frame);
+                    $this->rep($sender, $frame);
                     $this->busy($this->pid . ',' . $sender, $sender);
                     return;
                 }
             }
+
             if (isset($j['consume'])) {//       Set free and returns nothing until new message
                 if (!$this->shallSend2Free($himself, $sender)) {
                     $this->free($this->pid . ',' . $sender, $sender);
@@ -515,7 +568,7 @@ class wsServer
             }
 
             if (!$s) {
-                $this->rep($sender,$frame);
+                $this->rep($sender, $frame);
             }
             if (!$a) {//auth,list,sub,count,hb,push,broadcast
                 $this->send($sender, json_encode(['err' => 'json not valid']));
@@ -547,15 +600,17 @@ class wsServer
                         $m = $this->r()->lPop('pending:' . $topic);
                     } elseif ($this->r()->hExists('p2d', $topic) and $this->r()->hget('p2d', $topic)) {// Too much memory pressure then ...
                         $this->r()->HINCRBY('p2d', $topic, -1);
+                        $this->r()->decr('nbMessages2disk');
                         $x = glob($pvc . $topic . '/*.msg');
                         $x = reset($x);
                         $m = file_get_contents($x);
                         \unlink($x);
                     }
                     if ($m) {
-                        $this->r()->decr('p2disk');
-                        $this->r()->incr('sMsgSentOnFree');
-                        $this->r()->decr('sPending');
+
+                        $this->r()->incr('nbMsgSentOnFree');
+                        $this->r()->decr('nbPending');
+                        //echo"\nPending--:".$this->r()->get('nbPending');
                         $this->r()->HINCRBY('pendings', $topic, -1);
                         $this->db('free: ' . $himself . " $topic $sender receives :" . $m, 1);
                         $this->send($sender, json_encode(['queue' => $topic, 'message' => $m]));
@@ -572,8 +627,13 @@ class wsServer
     {
         global $wor;
         if ($this->redis) return $this->redis;
-        if ($wor == 1) $this->redis = new r1();
-        else $this->redis = new AtomicRedis();
+        if ($wor == 1) {
+            echo"\nPhpArray";
+            $_ENV['__a'] = $this->redis = new r1();
+        } else {
+            echo"\nAtoRedis";
+            $_ENV['__a'] = $this->redis = new AtomicRedis();
+        }
         return $this->redis;
     }
 
@@ -604,17 +664,29 @@ class wsServer
     function run($p, $options)
     {
         try {
+            // see https://openswoole.com/docs/modules/swoole-server-doc
+            //$m=SWOOLE_PROCESS;if($options['worker_num']==1)$m=SWOOLE_BASE;
             $this->server = $server = new Server('0.0.0.0', $p);
+            //  $this->server = $server = new swoole_websocket_server('0.0.0.0', $p);
+            //$this->server = $server = new Server('0.0.0.0', $p, SWOOLE_PROCESS, SWOOLE_SOCK_TCP | SWOOLE_SSL);
+            //$server->set(array('ssl_cert_file' => __DIR__.'/ssl.cert','ssl_key_file' => __DIR__.'/ssl.key',));
+
+
             $server->set($options);
+            echo"\nServer:".getMyPid();
             ///*
             $server->on('workerstart', function (Server $server) use ($p) {
                 //$this->childProcess('workerstart');
-                if ($this->pid) return;
+                //if ($this->pid) return;
                 $this->pid = \getmypid();
-                \Swoole\Timer::tick($this->timer, [$this, 'processPendingInBackground'], ['timer']);
+                echo"\nwstart".$this->pid;
+                \Swoole\Timer::tick($this->timer, [$this, 'processNbPendingInBackground'], ['timer']);
+                return;
+
 
                 register_shutdown_function(function () {
                     global $wor;
+                    echo"\nShutdown";
                     if ($wor == 1) {
                         file_put_contents('swoole.1worker.dump.json', json_encode($this->r()->dump()));
                     }
@@ -646,6 +718,7 @@ class wsServer
                 });
             });
             $server->on('workerstop', function (Server $server) use ($p) {
+                echo"\nwstop".getmypid();
                 $this->db('workerstop', 99);// Cleans the pool, participants who shall reconnect to another instance
 
                 foreach ($this->pool as $fd) {// Pour le pool des connections actives
@@ -669,22 +742,28 @@ class wsServer
                     $this->r()->Hdel('iam', $iam);
                 }
             });
-            $server->on('workererror', function (Server $server) use ($p) {
+            $server->on('workererror', function (Server $server, int $workerId, int $workerPid, int $exitCode, int $signal) use ($p) {
+                echo"\nworkerError".$exitCode.':'.getMyPid();
                 $this->db(['workererror', $p], 99);
             });
             $server->on('managerstart', function (Server $server) use ($p) {
+                echo"\nmStart".getmypid();
                 $this->db('managerstart');
             });
             $server->on('managerstop', function (Server $server) use ($p) {
+                echo"\nmStop".getmypid();
                 $this->db('managerstop');
             });
+
             if (1) {
                 $server->on('timer', function (Server $server) use ($p) {
                     $this->db('timer');
                 });
-                $server->on('connect', function (Server $server) use ($p) {
+                $server->on('connect', function (Server $server,$fd) use ($p) {
+                    echo"\nConnect:".$fd.':'.time();
                     $this->db('connect');
                 });
+                $server->on('shutdown', function (Server $server,$fd) use ($p) {  echo"\nShutdown:".time();  });
                 $server->on('receive', function (Server $server) use ($p) {
                     $this->db('receive');
                 });
@@ -695,6 +774,7 @@ class wsServer
                     $this->db('task');
                 });
                 $server->on('finish', function (Server $server) use ($p) {
+                    echo"\nfinish".getmypid();
                     $this->db('finish');
                 });
                 $server->on('pipemessage', function (Server $server) use ($p) {
@@ -709,6 +789,8 @@ class wsServer
                 });
 
                 $server->on('Task', function ($serv, Swoole\Server\Task $task) {
+                    echo"\ntask".getmypid();
+
                     return;
                     $this->db(['ontask' => $serv]);
                     $task->worker_id;
@@ -721,35 +803,34 @@ class wsServer
                 });
             }
             //*/
+            //$server->on('handshake', [$this, 'handshake']);
             $server->on('message', [$this, 'onMessage']);
             $server->on('open', function ($server, $req) {
+                $a=microtime(true)*1000;
                 //$this->childProcess('open');
-                $this->r()->incr('enCours');//sOpen,sClose,serverError,sMessage
-                $this->r()->incr('sOpen');//sOpen,sClose,serverError,sMessage
+                $this->r()->incr('nbConnectionsNonFermees');//nbOpened,nbClosed,serverError,sMessage
+                $this->r()->incr('nbOpened');//nbOpened,nbClosed,serverError,sMessage
                 $this->add('participants', $this->pid . ',' . $req->fd);
                 $this->pool[] = $req->fd;
                 $this->db("connection open: {$req->fd}", 2);
+                $a=round((microtime(true)*1000)-$a);
+                if($a>100)echo"\n".$a;
+                //echo "\n" . '{"pid":' . $this->pid . ',"id":' . $req->fd . '}';
                 $this->send($req->fd, '{"pid":' . $this->pid . ',"id":' . $req->fd . '}');//so he knows who he actually is
-
-                $this->ticks[$req->fd] = $server->tick($this->tick, function () use ($server, $req) {//Heartbeats, keep connection open
-                    $this->db('tick hb pool :' . implode(',', $this->pool));
-                    if (!in_array($req->fd, $this->pool)) {
-                        $server->clearTimer($this->ticks[$req->fd]);
-                        return;
-                    }
-                    $this->send($req->fd, 'hb:' . microtime(1));
-                });
             });
 
             $server->on('close', function ($server, $fd) {
-                $this->r()->decr('enCours');
-                $this->r()->incr('sClose');//sOpen,sClose,serverError,sMessage
+                $this->r()->decr('nbConnectionsNonFermees');
+                $this->r()->incr('nbClosed');//nbOpened,nbClosed,serverError,sMessage
                 $this->pool = array_diff($this->pool, [$fd]);
                 $himself = $this->pid . ',' . $fd;
                 if (isset($this->h2iam[$himself])) {
                     $iam = $this->h2iam[$himself];
+                    //echo"\nClosedI:".$iam;
                     $this->r()->Hdel('iam', $iam);
                     unset($this->fdIs[$himself]);
+                } else {
+                    //echo"\nClosed:".$fd.','.time();
                 }
                 $suscribtions = $this->r()->lrange('pid2sub:' . $himself, 0, -1);
                 foreach ($suscribtions as $sub) {
@@ -761,9 +842,11 @@ class wsServer
                 $this->db("connection close: {$fd}", 2);
             });
 
-            $server->on('start', function (Server $server) use ($p) {
-                global $swooleTableStringMaxSize, $nbReferences, $nbChannels, $nbAtomics, $nbWorkers, $capacityMessagesPerChannel, $binSize, $wor,$listTableNb,$listTableNbMaxSize;
-                $this->r()->incr('sStart');//sOpen,sClose,serverError,sMessage,sStart
+            $server->on('start', function (Server $server) use ($p) { // Le serveur uniquement, pas les workers
+                echo"\nss:".getmypid();
+
+                global $swooleTableStringMaxSize, $nbReferences, $nbChannels, $nbAtomics, $nbWorkers, $capacityMessagesPerChannel, $binSize, $wor, $listTableNb, $listTableNbMaxSize;
+                $this->r()->incr('sStart');//nbOpened,nbClosed,serverError,sMessage,sStart
                 $this->db("\t\t\t" . \getmypid() . '/' . $this->uuid . '::started::the parent process');// Doit en avoir un seul
 
                 if ($wor > 1) {
@@ -813,7 +896,7 @@ class wsServer
                     }
 
                     $_ENV['ref'] = new Swoole\Table($nbReferences);
-//$_ENV['ref']->column('e', Swoole\Table::TYPE_STRING, 1);// a:atomic,c:channel
+                    //$_ENV['ref']->column('e', Swoole\Table::TYPE_STRING, 1);// a:atomic,c:channel
                     $_ENV['ref']->column('v', Swoole\Table::TYPE_INT, $binSize);// 8:256 values
                     $_ENV['ref']->create();
                 }
@@ -822,10 +905,12 @@ class wsServer
                 // Les childs sont spawnés à ce moment .. overrider class server
             });
             $server->start();
+            echo"\nss1:".getmypid();
             echo ',' . __line__;
         } catch (\Throwable $e) {
             $this->r()->incr('serverError');
-            print_r($e);
+            echo"\n".getmypid().'--'.$e->getMessage();
+            echo"\n".json_encode($e);
             echo ',' . __line__;
             _db($e);
         }
@@ -866,14 +951,12 @@ class wsServer
     }
 }
 
-class r2 extends \Redis
-{// simple passthrough
-}
-
 class r1
 {// relies on simplest php data array ever
     public $a = [];
+    function setNX($k,$v){
 
+    }
     function dump()
     {
         return $this->a;
@@ -881,11 +964,13 @@ class r1
 
     function llen($k)
     {
+        if (!is_array($this->a[$k]) or !$this->a[$k]) return 0;
         return count($this->a[$k]);
     }
 
     function lpop($k)
     {
+        if (!is_array($this->a[$k]) or !$this->a[$k]) return null;
         return array_shift($this->a[$k]);
     }
 
@@ -902,6 +987,7 @@ class r1
 
     function rpush($k, $v)
     {
+        //echo"\nPush:$k:$v";
         if (!is_array($this->a[$k])) $this->a[$k] = [];
         return array_push($this->a[$k], $v);
     }
@@ -973,6 +1059,7 @@ class r1
 
     function lrem($k, $v)
     {
+        if (!$this->a[$k]) $this->a[$k] = [];
         $this->a[$k] = array_diff($this->a[$k], [0 => $v]);
         $a = 1;
     }
@@ -1014,8 +1101,10 @@ class r1
 
 }
 
-class AtomicRedis{ // when num workers > 1
-    function getChannelId($channelName){// Casts channel name to slot
+class AtomicRedis
+{ // when num workers > 1
+    function getChannelId($channelName)
+    {// Casts channel name to slot
         if (!$_ENV['ref']->exists($channelName)) {
             // refs('c:'.$chanName,$_ENV['atomics']['occupiedChannels']);$_ENV['atomics']['occupiedChannels']++;//connectedConsumers++// mess per channel= $_ENV['channels'][$i]->length()
             $fc = rkg('freeChannels');
@@ -1041,9 +1130,9 @@ class AtomicRedis{ // when num workers > 1
             $c = $this->getChannelId($chan);
             return $_ENV['channels'][$c]->pop();
         }
-        $x=json_decode($_ENV['listTable'][$chan]['v']);
-        $v=array_shift($x);
-        $_ENV['listTable'][$chan]=['v'=>json_encode($x)];
+        $x = json_decode($_ENV['listTable'][$chan]['v']);
+        $v = array_shift($x);
+        $_ENV['listTable'][$chan] = ['v' => json_encode($x)];
         return $v;
     }
 
@@ -1053,9 +1142,9 @@ class AtomicRedis{ // when num workers > 1
             $c = $this->getChannelId($chan);
             return $_ENV['channels'][$c]->pop();
         }
-        $x=json_decode($_ENV['listTable'][$chan]['v']);
-        $v=array_pop($x);
-        $_ENV['listTable'][$chan]=['v'=>json_encode($x)];
+        $x = json_decode($_ENV['listTable'][$chan]['v']);
+        $v = array_pop($x);
+        $_ENV['listTable'][$chan] = ['v' => json_encode($x)];
         return $v;
     }
 
@@ -1065,21 +1154,22 @@ class AtomicRedis{ // when num workers > 1
             $c = $this->getChannelId($chan);
             return $_ENV['channels'][$c]->push($msg);
         }
-        if(!$_ENV['listTable'][$chan]['v'])$_ENV['listTable'][$chan]['v']='[]';
-        $x=json_decode($_ENV['listTable'][$chan]['v']);
-        array_unshift($x,$msg);
-        $_ENV['listTable'][$chan]=['v'=>json_encode($x)];
+        if (!$_ENV['listTable'][$chan]['v']) $_ENV['listTable'][$chan]['v'] = '[]';
+        $x = json_decode($_ENV['listTable'][$chan]['v']);
+        array_unshift($x, $msg);
+        $_ENV['listTable'][$chan] = ['v' => json_encode($x)];
     }
+
     function rpush($chan, $msg)
     {
         if (strpos($chan, 'pending:') === 0) {
             $c = $this->getChannelId($chan);
             return $_ENV['channels'][$c]->push($msg);
         }
-        if(!$_ENV['listTable'][$chan]['v'])$_ENV['listTable'][$chan]['v']='[]';
-        $x=json_decode($_ENV['listTable'][$chan]['v']);
-        $x[]=$msg;
-        $_ENV['listTable'][$chan]=['v'=>json_encode($x)];
+        if (!$_ENV['listTable'][$chan]['v']) $_ENV['listTable'][$chan]['v'] = '[]';
+        $x = json_decode($_ENV['listTable'][$chan]['v']);
+        $x[] = $msg;
+        $_ENV['listTable'][$chan] = ['v' => json_encode($x)];
     }
 
 
@@ -1207,14 +1297,19 @@ function REFS($k, $v)
 
 return;
 ?>
-phpx -dxdebug.start_with_request=1 -dxdebug.remote_autostart=1 shiva3-atomics.php p=2000 reaktors=1 workers=1 pass={"bob":"pass","alice":"wolf"} &
+phpx -dxdebug.start_with_request=1 -dxdebug.remote_autostart=1 shiva3-atomics.php p=2000 reaktors=1 workers=1 pass={"bob":"pass","wet'":"leg"} &
 nb=1200;for((i=0;i<$nb;++i)) do php tests/max3.php 2000 $i $nb & done; # rame grave au dessus de 300
 
 
-pkill -9 -f 2000;pkill -9 -f 2001;pkill -9 -f redis-server;pkill -9 -f tail;pkill -9 -f 3.log;rm *.log;echo ''>3.log;echo ''>2.log;rm dump.rdb;redis-server 2>&1 >/dev/null & tail -f 2.log & tail -f 3.log & php $shiva/shiva3-atomics.php p=2000 reaktors=1 workers=1 pass={"bob":"pass","alice":"wolf"} &
+pkill -9 -f 2000;pkill -9 -f 2001;pkill -9 -f redis-server;pkill -9 -f tail;pkill -9 -f 3.log;rm *.log;echo ''>3.log;echo ''>2.log;rm dump.rdb;redis-server 2>&1 >/dev/null & tail -f 2.log & tail -f 3.log & php $shiva/shiva3-atomics.php p=2000 reaktors=1 workers=1 pass={"bob":"pass","wet'":"leg"} &
 nb=30;for((i=0;i<$nb;++i)) do php -dxdebug.start_with_request=1 -dxdebug.remote_autostart=1 $shiva/tests/max3.php 2000 $i $nb & done; # rame grave ...
 php $shiva/tests/max3.php dump;
 
 ps -ax|grep php|wc -l;# certains sont bloqués à cause de l'embouteillage
 
 
+TinyTest{
+pkill -9 -f php;phpx -dxdebug.start_with_request=1 -dxdebug.remote_autostart=1 shiva3-atomics.php p=2000 reaktors=1 workers=1 pass={"bob":"pass","wet":"leg"} &
+i=0;nb=6;for((i=0;i<$nb;++i)) do php -c php.ini max3.php 2000 $i $nb & done;
+ps -eo vsz,args  | grep 'php ' | grep -v php | awk '{ hr=$1/1024 ; sum +=hr} END {print sum}';#usage mémoire total en ko
+}

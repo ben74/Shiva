@@ -189,14 +189,7 @@ function websocket_open($host = '', $port = 80, $headers = '', &$error_string = 
     // Generate a key (to convince server that the update is not random)
     // The key is for the server to prove it i websocket aware. (We know it is)
     $key = base64_encode(openssl_random_pseudo_bytes(16));
-    $header = "GET " . $path . " HTTP/1.1\r\n"
-        . "Host: $host\r\n"
-        . "pragma: no-cache\r\n"
-        . "Upgrade: WebSocket\r\n"
-        . "Connection: Upgrade\r\n"
-        . "Sec-WebSocket-Key: $key\r\n"
-        . "Sec-WebSocket-Version: 13\r\n";
-
+    $header = "GET " . $path . " HTTP/1.1\r\nHost: $host\r\npragma: no-cache\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n";
     // Add extra headers
     if (!empty($headers)) foreach ($headers as $h) $header .= $h . "\r\n";
 
@@ -212,8 +205,8 @@ function websocket_open($host = '', $port = 80, $headers = '', &$error_string = 
     $ctx = $context ?? stream_context_create();
     $sp = stream_socket_client($address, $errno, $errstr, $timeout, $flags, $ctx);
 
-    if (!$sp) {
-        $error_string = "Unable to connect to websocket server: $errstr ($errno)";
+    if (!$sp or $errstr or $errno) {
+        $error_string = "US: $errstr ($errno)";
         return false;
     }
 
@@ -223,18 +216,19 @@ function websocket_open($host = '', $port = 80, $headers = '', &$error_string = 
         //Request upgrade to websocket
         $rc = fwrite($sp, $header);
         if (!$rc) {
-            $error_string
-                = "Unable to send upgrade header to websocket server: $errstr ($errno)";
+            $error_string = "Unable to send upgrade header to websocket server: $errstr ($errno)";
             return false;
         }
         // Read response into an assotiative array of headers. Fails if upgrade failes.
-        $reaponse_header = fread($sp, 1024);
+        $response_header = fread($sp, 1024);
+        if (!trim($response_header)) {
+            $error_string = 'on connect: no response';
+            return false;
+        }
 
         // status code 101 indicates that the WebSocket handshake has completed.
-        if (stripos($reaponse_header, ' 101 ') === false
-            || stripos($reaponse_header, 'Sec-WebSocket-Accept: ') === false) {
-            $error_string = "Server did not accept to upgrade connection to websocket."
-                . $reaponse_header . E_USER_ERROR;
+        if (stripos($response_header, ' 101 ') === false || stripos($response_header, 'Sec-WebSocket-Accept: ') === false) {
+            $error_string = "Server did not accept to upgrade connection to websocket." . $response_header . E_USER_ERROR;
             return false;
         }
         // The key we send is returned, concatenate with "258EAFA5-E914-47DA-95CA-
@@ -269,10 +263,8 @@ function websocket_write($sp, $data, $final = true, $binary = true)
     if (is_array($data)) $data = json_encode($data, true);
     // Assemble header: FINal 0x80 | Mode (0x02 binary, 0x01 text)
 
-    if ($binary)
-        $header = chr(($final ? 0x80 : 0) | 0x02); // 0x02 binary mode
-    else
-        $header = chr(($final ? 0x80 : 0) | 0x01); // 0x01 text mode
+    if ($binary) $header = chr(($final ? 0x80 : 0) | 0x02); // 0x02 binary mode
+    else $header = chr(($final ? 0x80 : 0) | 0x01); // 0x01 text mode
 
     // Mask 0x80 | payload length (0-125)
     if (strlen($data) < 126) $header .= chr(0x80 | strlen($data));
@@ -284,8 +276,7 @@ function websocket_write($sp, $data, $final = true, $binary = true)
     $header .= $mask;
 
     // Mask application data.
-    for ($i = 0; $i < strlen($data); $i++)
-        $data[$i] = chr(ord($data[$i]) ^ ord($mask[$i % 4]));
+    for ($i = 0; $i < strlen($data); $i++) $data[$i] = chr(ord($data[$i]) ^ ord($mask[$i % 4]));
 
     return fwrite($sp, $header . $data);
 }
@@ -294,12 +285,9 @@ function websocket_write($sp, $data, $final = true, $binary = true)
   Read from websocket
 
   string websocket_read(resource $handle [,string &error_string])
-
   read a chunk of data from the server, using hybi10 frame encoding
-
   handle
     the resource handle returned by websocket_open, if successful
-
   error_string (optional)
     A referenced variable to store error messages, i any
 
@@ -311,13 +299,13 @@ function websocket_write($sp, $data, $final = true, $binary = true)
  \*============================================================================*/
 function websocket_read($sp, &$error_string = NULL)
 {
-    $data = "";
+    $final = false;
+    $data = '';
 
-    do {
-        // Read header
+    while (!$final) {// Read header, even with no much workers
         $header = fread($sp, 2);
         if (!$header) {
-            $error_string = "Reading header from websocket failed.";
+            $error_string = 'rhf';
             return false;
         }
 
@@ -333,7 +321,7 @@ function websocket_read($sp, &$error_string = NULL)
             if ($payload_len == 0x7F) $ext_len = 8;
             $header = fread($sp, $ext_len);
             if (!$header) {
-                $error_string = "Reading header extension from websocket failed.";
+                $error_string = 'rhg';//Reading header extension from websocket failed.
                 return false;
             }
 
@@ -372,6 +360,7 @@ function websocket_read($sp, &$error_string = NULL)
 
             // Close
         } elseif ($opcode == 8) {
+            echo "\nClosin:";
             fclose($sp);
 
             // 0 = continuation frame, 1 = text frame, 2 = binary frame
@@ -387,9 +376,10 @@ function websocket_read($sp, &$error_string = NULL)
         } else
             continue;
 
-    } while (!$final);
+    }
 
     return $data;
 }
+
 
 return; ?>
