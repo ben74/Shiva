@@ -1,6 +1,5 @@
 <?php
 chdir(__dir__);
-require_once 'common.php';
 ini_set('display_errors', 1);
 $cli = $_ENV['cli'] = 0;
 
@@ -14,12 +13,12 @@ chdir(__dir__);
 $pid = getmypid();
 $errorExitCode = 69;
 $okExitCode = 1;
-$to = 10;
+$to = 20;
 $exit = $e = $tentative = 0;
 
 try {
     $success = Run(function () use ($argv) {
-        global $e, $tentative, $to, $log, $cli, $pid,$exit, $errorExitCode, $okExitCode;
+        global $e, $tentative, $to, $log, $cli, $pid, $exit, $errorExitCode, $okExitCode;
         $log = [$pid];
         $z = $argv;
         array_shift($z);
@@ -40,7 +39,7 @@ try {
         $total = 9;
 
         if ($argv[1]) $port = $argv[1];
-        if (in_array($port,['connects','test','restart'])) {//  php max4.php test shiva.devd339.dev.infomaniak.ch 80
+        if (in_array($port, ['connects', 'test', 'restart'])) {//  php max4.php test shiva.devd339.dev.infomaniak.ch 80
             //echo json_encode($argv);
             $_ENV['cli'] = $cli = new Client($argv[2], $argv[3]);
             $cli->set(['timeout' => 10, 'connect_timeout' => 10, 'write_timeout' => 10, 'read_timeout' => 10,
@@ -48,9 +47,19 @@ try {
             ]);
             $cli->upgrade('/');
             $res[] = read('start', $e);
-            if ($e) {$exit=69;return;}
-            if($port=='connects'){$exit=1;return;}// User defined signal 2
-            if($port=='restart'){$cli->push(json_encode(['restart' => 1]));$exit=1;return;}// User defined signal 2
+            if ($e) {
+                $exit = 69;
+                return;
+            }
+            if ($port == 'connects') {
+                $exit = 1;
+                return;
+            }// User defined signal 2
+            if ($port == 'restart') {
+                $cli->push(json_encode(['restart' => 1]));
+                $exit = 1;
+                return;
+            }// User defined signal 2
 
             //$cli->push(json_encode(['queue' => 'ye', 'msg' => 'yeah-men' . time()]));
             $cli->push(json_encode(['dump' => 1]));
@@ -86,7 +95,7 @@ try {
         $finished = false;
         while (!$finished) {
             try {
-                if($exit)return;
+                if ($exit) return;
                 //echo '.';
                 $tentative++;
                 if ($cli) {
@@ -132,7 +141,7 @@ try {
 
                 $finalOk = 0;
                 $last = '{"free":"1"}';
-                $discussion = ['{"push":"' . $pushes . '","message":"' . $pushes . 'MessagContains:' . $pid . '-' . uniqid() . '"}', '{"status":"free"}', '{"suscribe":"' . $receives . '"}', $last];//,'{"status":"free"}','{wait:}' => la TX du message peut avoir lieu bien après
+                $discussion = ['{"iam":'.$nb.'}','{"push":"' . $pushes . '","message":"' . $pushes . 'MessagContains:' . $pid . '-' . uniqid() . '"}', '{"status":"free"}', '{"suscribe":"' . $receives . '"}', $last];//,'{"status":"free"}','{wait:}' => la TX du message peut avoir lieu bien après
                 foreach ($discussion as $q) {
                     $b = microtime(1);
                     $waits = 0;
@@ -145,13 +154,13 @@ try {
                         continue;
                     }
 
-                    while ($q == $last and !strpos($x, 'MessagContains')) {//Waits for the last message
+                    while ($q == $last and !strpos($x, 'MessagContains') and !strpos($x, '"queue":')) {//Waits for the last message
                         $waits++;
                         $cli->push(json_encode(['keepalive' => 1]));//
                         $x = read('free:' . $waits, $e);// Not behaving any better
                         if ($e) {
                             if (1 or $waits > 7) {
-                                $x = '---MessagContains';
+                                $x = '-"queue":--MessagContains';//last:{"queue":"ya","message":"yaMessagContains:90484-630883aa07914"}
                                 continue;
                             }
                             $e = null;
@@ -161,11 +170,18 @@ try {
                     }
                     if ($e) break;
 
+
                     if ($waits) $log[] = 'waits:' . $waits;
                     if ($q == $last) {
+                        //echo"\nlast:$x";
                         $finalOk = 1;
                         //$log[] = $x;
+                    }elseif(strpos($x,'json pay')){
+                        echo"\n$q->$x";
+                    }else{
+                        //echo"\nrep:$x";
                     }
+
                     $res[$q . '::' . round(((microtime(1) - $b) * 1000), 0) . 'ms'] = $x;
                 }
                 if ($e) continue;
@@ -222,7 +238,7 @@ try {
     fpc('err.log', "\nC:" . getmypid() . '=>' . $e->getMessage(), 8);
 }
 
-if($exit)die($exit);
+if ($exit) die($exit);
 die(1);
 //die($e->getStatus());
 
@@ -291,3 +307,13 @@ function read($reason = '', &$error = 0)
 }
 
 return; ?>
+
+pkill -9 -f stressT;pkill -9 -f websocket;phpx websocket-min.php &
+ho='127.0.0.1';po=2001;nb=300;
+
+exitCode=69; while [ $exitCode == 69 ]; do php stressTest.php connects $ho $po;exitCode=$?; done; echo $exitCode;
+#sleep 2;#init
+pkill -9 -f stressTest.php;   for((i=1;i<$nb;++i)) do ( exitCode=69; while [ $exitCode == 69 ]; do php stressTest.php $po $i $nb $ho >> res.log & pid=$!;wait $pid;exitCode=$?; done;  ) & done;
+
+php stressTest.php test 127.0.0.1 2001 | jq
+
