@@ -88,7 +88,7 @@ $sw = new wsServer($p, $options, $needAuth, $tokenHashFun, $pass, $log, $timerMs
 
 class wsServer
 {
-    public $log, $timer, $bgProcessing = false, $tokenHashFun, $passworts = [], $needAuth = false, $uuid = 0, $parentPid = 0, $server, $redis, $pid = 0, $frees = [], $pendings = 0, $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [], $tick = 20000000;
+    public $workerCache, $log, $timer, $bgProcessing = false, $tokenHashFun, $passworts = [], $needAuth = false, $uuid = 0, $parentPid = 0, $server, $redis, $pid = 0, $frees = [], $pendings = 0, $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [], $tick = 20000000;
 
     function db($x, $level = 9, $minLogLevel = 3)
     {
@@ -478,10 +478,11 @@ class wsServer
         }
 
         // $_ENV['hashFun']='crc32c';
-        if ($this->r()->a['ack'] and 'vérification des messages non ackés afin de les requeuer') {
+        if ($this->r()->exists('ack') and 'vérification des messages non ackés afin de les requeuer') {
             $mod = 0;
             $now = time();
-            foreach ($this->r()->a['ack'] as $msg => &$timeMsg) {
+            $ack = $this->r()->get('ack');
+            foreach ($ack as $msg => &$timeMsg) {
                 $time = $timeMsg['time'];
                 if ($time < $now) {
                     $this->r()->incr('nbPending');//todo:dispatch on free asap
@@ -493,9 +494,9 @@ class wsServer
             }
             unset($timeMsg);
             if ($mod) {
-                $this->r()->incr('nbAckRqued',$mod);
+                $this->r()->incr('nbAckRqued', $mod);
                 echo "\nExpired consumed messages not acked .. : " . $mod;
-                $this->r()->a['ack'] = array_filter($this->r()->a['ack']);
+                $this->r()->set('ack', array_filter($ack));
             }
         }
 
@@ -742,15 +743,16 @@ class wsServer
     {
         global $wor;
         if ($this->redis) return $this->redis;
+        $this->workerCache = new r1();
         if ($wor == 1) {
-            echo "\nstorage:purePhp";
+            echo "\nsingle worker storage is php";
             $_ENV['__a'] = $this->redis = new r1();
-        } elseif (1) {
+        } elseif (class_exists('Redis')) {
+            echo "\nmultiple workers:using redis backend";
+            $_ENV['__a'] = $this->redis = new \Redis();
+        } else {
             echo "\nmultiple workers:SwooleAtomic";
             $_ENV['__a'] = $this->redis = new AtomicRedis();
-        } else {
-            echo "\nmultiple workers:using redis backend";
-            //$_ENV['__a'] = $this->redis = new r2();
         }
         return $this->redis;
     }
@@ -969,7 +971,6 @@ class wsServer
     }
 }
 
-//class r2 extends \redis{}
 class r1
 {// relies on simplest php data array ever
     public $a = [];

@@ -13,7 +13,7 @@ chdir(__dir__);
 $pid = getmypid();
 $errorExitCode = 69;
 $okExitCode = 1;
-$to = 20;
+$to = 5;
 $exit = $e = $tentative = 0;
 
 try {
