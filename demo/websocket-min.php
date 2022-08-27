@@ -5,6 +5,7 @@
  * foreach($this->r()->a['ack'] as $timeAndMessage){ if(time()+10>now())Break;$this->r()->rPush('pending:queue',$msg);}      // dans le ticker
  */
 if ('vars -- overridable via arguments') {
+    $_ENV['expireMessageAck2Requeue'] = 10;
     $maxConn = $backlog = 600;
     $p = 2001;
     $reaktors = $workers = 1;
@@ -163,6 +164,11 @@ class wsServer
                 }
             }
 
+            if (isset($j['ack'])) {
+                $this->r()->incr('nbAck');
+                if ($this->r()->hExists('ack', $j['ack'])) $this->r()->incr('nbAckDeleted');
+                return $this->r()->hDel('ack', $j['ack']);
+            }
             if (isset($j['restart'])) {
                 return $this->restart();
             }
@@ -327,7 +333,7 @@ class wsServer
                     $this->r()->incr('nbPushed');
                     $a = 1;
                     $s++;
-                    $this->send($sender, hash('crc32c', $j['message']));#aka:ack
+                    $ok = $this->send($sender, hash('crc32c', $j['message']));#aka:ack
                     $sub = $this->r()->lrange('suscribers:' . $j['push'], 0, -1);
                     $free = $this->r()->lrange('free', 0, -1);
                     $libres = array_intersect($sub, $free);
@@ -341,7 +347,7 @@ class wsServer
                         $this->busy($him, $fd);
                         $this->r()->incr('nbSentAsap');
                         $this->r()->HINCRBY('sentAsapToFd', $fd, 1);
-                        $this->send($fd, json_encode(['queue' => $j['push'], 'message' => $j['message']]));
+                        $ok = $this->send($fd, ['queue' => $j['push'], 'message' => $j['message']], 'pubConsumed', $j['push'], $j['message']);
                         return;
                     } else {
                         $this->r()->incr('nbPending');
@@ -407,7 +413,7 @@ class wsServer
                 $this->r()->incr('sNotUnder');
                 $jj = $frame->data;
                 if (is_array($j)) $jj = implode(',', array_keys($j));
-                $this->db(',' . $this->uuid . ",message not understood :" . $jj);
+                $this->db(',' . $this->uuid . ", message not understood :" . json_encode($frame->data));
             }
         } else {
             $this->send($sender, json_encode(['err' => 'not json']));
@@ -471,6 +477,29 @@ class wsServer
             file_put_contents('backup.json', json_encode($x));
         }
 
+        // $_ENV['hashFun']='crc32c';
+        if ($this->r()->a['ack'] and 'vérification des messages non ackés afin de les requeuer') {
+            $mod = 0;
+            $now = time();
+            foreach ($this->r()->a['ack'] as $msg => &$timeMsg) {
+                $time = $timeMsg['time'];
+                if ($time < $now) {
+                    $this->r()->incr('nbPending');//todo:dispatch on free asap
+                    $this->r()->a['pendings'][$timeMsg['queue']]++;//todo:dispatch on free asap
+                    $this->r()->lpush('pending:' . $timeMsg['queue'], $timeMsg['message']);//todo:dispatch on free asap
+                    $timeMsg = null;
+                    $mod++;
+                }
+            }
+            unset($timeMsg);
+            if ($mod) {
+                $this->r()->incr('nbAckRqued',$mod);
+                echo "\nExpired consumed messages not acked .. : " . $mod;
+                $this->r()->a['ack'] = array_filter($this->r()->a['ack']);
+            }
+        }
+
+
         $this->bgProcessing = false;
 
         $free = $this->r()->get('free');//frees;
@@ -507,7 +536,7 @@ class wsServer
                     if ($m) {
                         $this->busy($this->pid . ',' . $fd, $fd);
                         $this->r()->HINCRBY('pendings', $sub, -1);
-                        $this->send($fd, json_encode(['queue' => $sub, 'message' => $m]), 'async');
+                        $ok = $this->send($fd, ['queue' => $sub, 'message' => $m], 'async', $sub, $m);//
                         $this->r()->HINCRBY('messagesSentToFdOnBackground', $fd, 1);
                         $nbSent = $this->r()->hget('messagesSentToFdOnBackground', $fd);
                         if ($nbSent > 1) {
@@ -601,42 +630,63 @@ class wsServer
         return $ret;
     }
 
-    function send($fd, $mess, $plus = '')
+    function send($fd, $mess, $plus = '', $q = null, $msg = null)
     {
+        $ack = false;
+        if (is_array($fd)) extract($fd);
         if (!$fd) {
             $this->db(['wtr?', debug_backtrace(-2)], 99);
             return;
         }
-        if (is_array($mess)) $mess = json_encode($mess);
-        if (strpos($mess, '"queue":')) $this->r()->incr('nbPushedConsumed');
-        $success = 0;
+        if (is_array($mess)) {
+            if (isset($_ENV['expireMessageAck2Requeue']) and in_array($plus, ['async', 'pubConsumed']) and 'enForceAck') {
+                $mess['ack'] = $ack = uniqid();//hash($_ENV['hashFun'], $mess['queue'].$mess['message'])
+                $ackPayload = ['time' => time() + $_ENV['expireMessageAck2Requeue'], 'queue' => $mess['queue'], 'message' => $mess['message']];
+            }
+            $mess = json_encode($mess);
+        }
+
+        $success = false;
         while (!$success) {
+
             $success = $this->server->push($fd, $mess);// or send
             if (!$success) {
-/*
--- https://openswoole.com/docs/modules/swoole-server-getLastError : 1004 connection closed
-1001: The connection has been closed by the server.
-1002: The connection has been closed by the client side.
-1003: The connection is closing.
-1004: The connection is closed.
-1005: The connection does not exist or incorrect $fd was given.
-1007: Received data after connection has been closed already. Data will be discarded.
-1008: The send buffer is full, cannot perform any further send operations as buffer is full.
-1202: The data sent exceeds the buffer_output_size configuration option.
-9007: Only for dispatch_mode 3, indicates that the process is not currently available.
-*/
+                /*
+                -- https://openswoole.com/docs/modules/swoole-server-getLastError : 1004 connection closed
+                1001: The connection has been closed by the server.
+                1002: The connection has been closed by the client side.
+                1003: The connection is closing.
+                1004: The connection is closed.
+                1005: The connection does not exist or incorrect $fd was given.
+                1007: Received data after connection has been closed already. Data will be discarded.
+                1008: The send buffer is full, cannot perform any further send operations as buffer is full.
+                1202: The data sent exceeds the buffer_output_size configuration option.
+                9007: Only for dispatch_mode 3, indicates that the process is not currently available.
+                */
+                $this->r()->incr('nbSentError');
                 $this->busy($fd, $fd);// remove connection from freed, so no more bottlenecks :)
-                $this->db('err:'.$this->server->getLastError().'->'.$fd, 99);
+                $this->db('err:' . $this->server->getLastError() . '->' . $fd, 99);
+                if ($ack and 'Requeue It In Da Loop') {
+                    $this->r()->lpop($q, $msg);
+                }
                 //$this->db('nosuccess sending ' . $mess . ' to ' . $fd . ' -- disconnected ?' . $plus->finish, 99);
                 if ($plus->finish) return;// Tries returning ack for Free
                 return;
                 sleep(1);
             }
+
+            if (isset($_ENV['expireMessageAck2Requeue']) and $ack and $ackPayload) {
+                $this->r()->a['ack'][$ack] = $ackPayload;
+            }
+
+            if (strpos($mess, '"queue":')) {
+                $this->r()->incr('nbPushedConsumed');
+            }
             $this->db('sentto:' . $fd, 1);
         }
         $this->r()->set('lastSent', time());
         $this->r()->incr('nbSend');
-        return;
+        return $success;
     }
 
     function rep($sender, $frame)
@@ -678,7 +728,7 @@ class wsServer
                         //echo"\nPending--:".$this->r()->get('nbPending');
                         $this->r()->HINCRBY('pendings', $topic, -1);
                         $this->db('free: ' . $himself . " $topic $sender receives :" . $m, 1);
-                        $this->send($sender, json_encode(['queue' => $topic, 'message' => $m]));
+                        $this->send($sender, ['queue' => $topic, 'message' => $m], 'async', $topic, $m);
                         $this->busy($this->pid . ',' . $sender, $sender);
                         return true;
                     }
@@ -794,7 +844,7 @@ class wsServer
                 $server->on('disconnect', function (Server $server, $fd) use ($p) {
                     return;
                     $this->r()->decr('connected');
-                    $this->db('disconnected',9);
+                    $this->db('disconnected', 9);
                     //echo "\nConnect:" . $fd . ':' . time();
                 });
                 $server->on('shutdown', function (Server $server, $fd) use ($p) {

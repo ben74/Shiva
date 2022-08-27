@@ -76,6 +76,7 @@ try {
         if (isset($argv[2])) $nb = $argv[2];
         if (isset($argv[3])) $total = $argv[3];
         if (isset($argv[4])) $host = $argv[4];
+        if (isset($argv[5])) $to = $argv[5];
 
         if (0 and 'stacker 1000 consommateurs en wait ... nope... bad idea') {
             $each = $total / $nbTopics;// 300/3
@@ -141,7 +142,7 @@ try {
 
                 $finalOk = 0;
                 $last = '{"free":"1"}';
-                $discussion = ['{"iam":'.$nb.'}','{"push":"' . $pushes . '","message":"' . $pushes . 'MessagContains:' . $pid . '-' . uniqid() . '"}', '{"status":"free"}', '{"suscribe":"' . $receives . '"}', $last];//,'{"status":"free"}','{wait:}' => la TX du message peut avoir lieu bien après
+                $discussion = ['{"iam":' . $nb . '}', '{"push":"' . $pushes . '","message":"' . $pushes . 'MessagContains:' . $pid . '-' . uniqid() . '"}', '{"status":"free"}', '{"suscribe":"' . $receives . '"}', $last];//,'{"status":"free"}','{wait:}' => la TX du message peut avoir lieu bien après
                 foreach ($discussion as $q) {
                     $b = microtime(1);
                     $waits = 0;
@@ -173,12 +174,15 @@ try {
 
                     if ($waits) $log[] = 'waits:' . $waits;
                     if ($q == $last) {
+                        $y = json_decode($x, true);$ack = json_encode(['ack' => $y['ack']]);$cli->push($ack);//
+
+                        //echo "\nack:" . $x . '=>' . $ack;
                         //echo"\nlast:$x";
                         $finalOk = 1;
                         //$log[] = $x;
-                    }elseif(strpos($x,'json pay')){
-                        echo"\n$q->$x";
-                    }else{
+                    } elseif (strpos($x, 'json pay')) {
+                        echo "\n$q->$x";
+                    } else {
                         //echo"\nrep:$x";
                     }
 
@@ -307,8 +311,11 @@ function read($reason = '', &$error = 0)
 }
 
 return; ?>
+pkill -9 -f stressT;pkill -9 -f websocket;pkill -9 -f res.log;# Arret d'Urgence, KillAll !
 
-pkill -9 -f stressT;pkill -9 -f websocket;phpx websocket-min.php &
+cd $shiva/demo
+tail -f res.log &
+echo ''>res.log;pkill -9 -f stressT;pkill -9 -f websocket;phpx websocket-min.php > res.log &
 ho='127.0.0.1';po=2001;nb=300;
 
 exitCode=69; while [ $exitCode == 69 ]; do php stressTest.php connects $ho $po;exitCode=$?; done; echo $exitCode;
