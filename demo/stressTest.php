@@ -39,7 +39,7 @@ try {
         $total = 9;
 
         if ($argv[1]) $port = $argv[1];
-        if (in_array($port, ['connects', 'test', 'restart'])) {//  php max4.php test shiva.devd339.dev.infomaniak.ch 80
+        if (in_array($port, ['del','dump','connects', 'test', 'restart'])) {//  php max4.php test shiva.devd339.dev.infomaniak.ch 80
             //echo json_encode($argv);
             $_ENV['cli'] = $cli = new Client($argv[2], $argv[3]);
             $cli->set(['timeout' => 10, 'connect_timeout' => 10, 'write_timeout' => 10, 'read_timeout' => 10,
@@ -52,6 +52,11 @@ try {
                 return;
             }
             if ($port == 'connects') {
+                $exit = 1;
+                return;
+            }// User defined signal 2
+            if ($port == 'del') {
+                $cli->push(json_encode(['del' => 1]));
                 $exit = 1;
                 return;
             }// User defined signal 2
@@ -324,3 +329,5 @@ pkill -9 -f stressTest.php;   for((i=1;i<$nb;++i)) do ( exitCode=69; while [ $ex
 
 php stressTest.php test 127.0.0.1 2001 | jq
 
+
+( exitCode=69; while [ $exitCode == 1 ]; do php php artisan queue:work --queue=delete & pid=$!;wait $pid;exitCode=$?; done;  ) &

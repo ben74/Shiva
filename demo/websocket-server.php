@@ -1,4 +1,4 @@
-<?php
+0<?php
 /*
     Chaque worker est responsable de la rétention de ses propres messages, hormis pour les pendings non consommés immédiatement lorsqu'un nouveau personnage rejoint l'équipage alors ??
 
@@ -17,7 +17,11 @@
 
     Car simplicité du système, si un worker -> référence mémoire php directe
      */
-$maxConn = $backlog = 12000;
+$maxRequests=0;
+$dispatchMode=2;
+$reaktors = $workers = 1;// Limitation 1 cpu afin de ne pas utiliser les tables Swoole ( j'ai l'impression qu'il finit par arriver des erreurs sur les consumers alive qui sont en réalité déconnectés en fin de test lorsque l'on passe par ces dernières sur multiples process )
+$pass = ['bob' => 'pass', 'alice' => 'wolf'];
+$maxConn = $backlog = 24000;
 $tick = 20000000;//tick each 20 sec
 
 
@@ -33,8 +37,6 @@ $timerMs = 1000;
 $redisPort = 6379;
 
 $redisIp = '127.0.0.1';
-$reaktors = $workers = 1;
-$pass = ['bob' => 'pass', 'alice' => 'wolf'];
 $maxMemUsageMsgToDisk = 50000 * 1024 * 1024;
 $setmem = $log = $del = $memUsage = $action = $needAuth = 0;
 
@@ -47,7 +49,7 @@ $maxSuscribersPerChannel = 200;//$_ENV['subPerChannel'] ?? 200;
 $_ENV['gt'] = [];
 
 
-if (1 or 'default overridable configuration') {//        //
+if ('Default overridable configuration') {//        //
     $a = [];
     $z = $argv;
     array_shift($z);
@@ -91,7 +93,7 @@ if (1) {
     $wor = ceil($workers);  //(swoole_cpu_num() * $workers);
     if ($wor < $rea) $wor = $rea;
     echo "\nMaster:" . \getmypid() . ":Rea:$rea,wor:$wor";
-    $options = [//  https://www.swoole.co.uk/docs/modules/swoole-server/configuration
+    $options = [//      https://www.swoole.co.uk/docs/modules/swoole-server/configuration
         //$socket>setOption(SOL_SOCKET, SO_REUSEPORT, true)
         'reactor_num' => $rea,
         'worker_num' => $wor,
@@ -99,8 +101,8 @@ if (1) {
         // swoole WARNING	Server::accept_connection(): accept() failed, Error: Too many open files[24]
         //'daemonize' => 1,
         'log_file' => '/dev/null', 'log_level' => 5,//SWOOLE_LOG_INFO,
-        'max_request' => 0,
-        'dispatch_mode' => 2,//Fixed fd per process : 7 : use idle, 1 : async and non blocking
+        'max_request' => $maxRequests,
+        'dispatch_mode' => $dispatchMode,// 2:Fixed fd per process : 7 : use idle, 1 : async and non blocking
         'discard_timeout_request' => false,
         'tcp_fastopen' => true,
         'open_tcp_nodelay' => true,

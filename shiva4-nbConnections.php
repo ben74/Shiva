@@ -4,8 +4,10 @@
  * php --ri openswoole | grep version
  */
 $maxConn = 10240;
-$maxConn = $backlog = 300;
-$tick = 20000000;//tick each 20 sec
+$nbChannels = 30;
+$reaktors = $workers = 1;
+$maxConn = $backlog = 900;
+$tick = 20000000;// tick each 20 sec .. only on first Process .. Evaluates pending Messages towards newly (Delayed) Connected Consumers
 
 
 $listTableNb = 900;
@@ -20,13 +22,13 @@ $timerMs = 1000;
 $redisPort = 6379;
 
 $redisIp = '127.0.0.1';
-$reaktors = $workers = 1;
+
 $pass = ['bob' => 'pass', 'alice' => 'wolf'];
 $maxMemUsageMsgToDisk = 50000 * 1024 * 1024;
 $setmem = $log = $del = $memUsage = $action = $needAuth = 0;
 
 $taskWorkers = 2;//$_ENV['taskWorkers'] ?? 2;
-$nbChannels = 30;//$_ENV['nbChannels'] ?? 30;
+//$_ENV['nbChannels'] ?? 30;
 $nbAtomics = 0;// non nécessaires ici //$_ENV['nbAtomics'] ?? 100;
 $binSize = strlen(bindec(max($nbChannels, $nbAtomics)));
 $capacityMessagesPerChannel = 90;//$_ENV['chanCap'] ?? 90;
@@ -34,7 +36,7 @@ $maxSuscribersPerChannel = 200;//$_ENV['subPerChannel'] ?? 200;
 $_ENV['gt'] = [];
 
 
-if (1 or 'default overridable configuration') {//        //
+if ('default overridable configuration') {//        //
     $a = [];
     $z = $argv;
     array_shift($z);
@@ -85,7 +87,7 @@ if (1) {
         'max_connection' => $maxConn,// Max active connections - limited to ulimit -n : 256
         'enable_coroutine' => true,
         'open_cpu_affinity' => true,
-        'max_request_execution_time' => 1, // 30s
+        'max_request_execution_time' => 1000, // in milliseconds
         'dispatch_mode' => 2,// 2: Fixed fd per process : 7 : use idle, 1 : async and non blocking, 3 : worker only taks actual possible connections
         //'tcp_defer_accept' => 1,// wait foreach connections
         'max_request_grace' => 0,
@@ -124,7 +126,7 @@ $sw = new wsServer($p, $options, $needAuth, $tokenHashFun, $pass, $log, $timerMs
 
 class wsServer
 {
-    public $log, $timer, $bgProcessing = false, $tokenHashFun, $passworts = [], $needAuth = false, $uuid = 0, $parentPid = 0, $server, $redis, $pid = 0, $frees = [], $pendings = 0, $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [], $tick = 20000000;
+    public $log, $timer, $bgProcessing = false, $tokenHashFun, $passworts = [], $needAuth = false, $uuid = 0, $parentPid = 0, $server, $redis, $pid = 0, $frees = [], $pendings = 0, $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [];//, $tick = 20000000;
 
     function onMessage($server, $frame)// simple reflexion
     {
@@ -354,8 +356,9 @@ class wsServer
                 $this->r()->incr('sStart');//sOpen,sClose,serverError,sMessage,sStart
                 $this->db("\t\t\t" . \getmypid() . '/' . $this->uuid . '::started::the parent process');// Doit en avoir un seul
 
-                if ($wor > 1) {
-                    $_ENV['atomics'] = ['received' => new Swoole\Atomic(),
+                if ($wor > 1 and 'onServerStart if more than 1 worker, rely on Atomic and Tables') {// so each worker reference the same atomic space in order to keep the right numbers
+                    $_ENV['atomics'] = [
+                        'received' => new Swoole\Atomic(),
                         'occupiedChannels' => new Swoole\Atomic(),
                         'connectedConsumers' => new Swoole\Atomic(),
                     ];
@@ -363,12 +366,12 @@ class wsServer
                     $_ENV['tables'] = $_ENV['channels'] = $_ENV['workerAtomics'] = [];
 
                     $_ENV['listTable'] = new Swoole\Table($listTableNb);
-                    $_ENV['listTable']->column('v', Swoole\Table::TYPE_STRING, $listTableNbMaxSize);
+                    $_ENV['listTable']->column('v', Swoole\Table::TYPE_STRING, $listTableNbMaxSize);// rows
 
                     $_ENV['rkv'] = new Swoole\Table($nbReferences);
                     $_ENV['rkv']->column('v', Swoole\Table::TYPE_STRING, $swooleTableStringMaxSize);
                     $_ENV['rkv']->create();
-                    if (1) {
+                    if ('Affecter 30 channels libres -> un nom vers un identifiant afin de savoir rapidement le nb de message dedans') {
                         // is an array
                         $_ENV['rkv']->set('freeChannels', ['v' => json_encode(range(0, $nbChannels - 1))]);
                         if ($nbAtomics) {
@@ -399,11 +402,12 @@ class wsServer
                         }
 
                     }
-
+if('afin de permettre le mapping'){
                     $_ENV['ref'] = new Swoole\Table($nbReferences);
 //$_ENV['ref']->column('e', Swoole\Table::TYPE_STRING, 1);// a:atomic,c:channel
                     $_ENV['ref']->column('v', Swoole\Table::TYPE_INT, $binSize);// 8:256 values
                     $_ENV['ref']->create();
+}
                 }
 
 
@@ -458,7 +462,7 @@ class r2 extends \Redis
 }
 
 class r1
-{// relies on simplest php data array ever
+{// single process only :: all data is stored on the server process : relies on simplest php data array
     public $a = [];
 
     function dump()
@@ -600,8 +604,6 @@ class r1
     {
         return $this->a[$k];
     }
-
-
 }
 
 class AtomicRedis

@@ -2,13 +2,13 @@
 ---
 <hr>
 
-1) <pre>docker run --name shiva --rm -p 82:82 -p 2000:2000 -e portweb=82 -e port=2000 -e reaktors=2 -e workers=3 -e pass='{"b":"c"}' -e needAuth=0 -e log=0 -e pvc=/pvc -v `pwd`:/pvc -ti docker.io/alptech/yuzu:shiva</pre>
+1) <pre>docker run --name shiva --rm -p 82:82 -p 2000:2000 -e portweb=82 -e port=2000 -e reaktors=1 -e workers=1 -e pass='{"b":"c"}' -e needAuth=0 -e log=0 -e pvc=/pvc -v `pwd`:/pvc -ti docker.io/alptech/yuzu:shiva</pre>
 
 2) Go http://192.168.99.100:82 ( your docker host ip on previously specified port and play with the websockets )
 
 3) Please note this is a demonstrator with lots of pendings updates and optimizations
 4) Go shiva2.php for server logic and tests/max2.php for the client php logic
-5) If you haven't enough connections available, consider raising your file descriptor limit ;) <pre>ulimit -n 10000</pre>
+5) If you haven't enough connections available, consider raising your file descriptor limit ;) <pre>ulimit -n 60000</pre>
 
 <hr>
 
