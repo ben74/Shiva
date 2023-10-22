@@ -1,29 +1,38 @@
 <?php
 /*
-    Chaque worker est responsable de la rétention de ses propres messages, hormis pour les pendings non consommés immédiatement lorsqu'un nouveau personnage rejoint l'équipage alors ??
+Pb : lance 3 processus ...
+
+
+-    Chaque worker est responsable de la rétention de ses propres messages, hormis pour les pendings non consommés immédiatement lorsqu'un nouveau suscriber rejoint tappe t-il dedans ??
 
     -> la tâche de fond timer le dispatcher au fd qui a suscribé et qui sera free ( dont la valeur du atomic est de 1)
 
     - pendings:queue: $array propre à chaque worker si aucun consommateur présent à l'instant t
-    - env table:suscribers : queue 1234, fd:up to 5 chars * nb consumer = 15000 colonnes sur bigtable
-    -  env table fdstatus fd:1 value:1 or atomic ?
-    - 1 atomic free par consumer-> permettant de dispatcher aux autres
+
+    - env table:suscribers : queue 1234 ( chaque nom de queue devient un chiffre à, fd : up to 5 chars ( jusqu'à 99999 à * nb consumer Max = 15000 rows sur bigtable
+    - env table fdstatus fd:1 value:1 or atomic ? status de chaque suscriber
+
+    - 1 atomic free par consumer ( fd ) -> permettant de dispatcher aux autres : permet de croiser suscribers et status rapidement
     - mono worker comme cela que des vars en php malloc par tra chez de 2 mo
-
-
 
     1155/1822 : bateaux menthon stb after sunset over the horizon
     1161/1822 : clocher de poros
 
-    Car simplicité du système, si un worker -> référence mémoire php directe
-     */
+    - Simplicité du système, si un worker -> référence mémoire php directe
+*/
+
+$tick = 20000000;// tick each 20 sec :: backup tables to disk
+
 $maxConn = $backlog = 12000;
-$tick = 20000000;//tick each 20 sec
-
-
-$listTableNb = 900;
 $swooleTableStringMaxSize = $listTableNbMaxSize = 9000;// participants, suscribers, free, pending: => intercepted to channel on rpush
 
+$listTableNb = 900;// nb max de chaines
+$nbChannels = 30;//$_ENV['nbChannels'] ?? 30;
+$capacityMessagesPerChannel = 300;//$_ENV['chanCap'] ?? 90;
+$maxSuscribersPerChannel = 300;//$_ENV['subPerChannel'] ?? 200;
+
+$hbIdle=60000;/*60s*/
+$hbCheckEach=60;// leads to some workers timeouts errors
 
 $pvc = $salt = '';
 $socketSizeKo = 1;
@@ -38,12 +47,10 @@ $pass = ['bob' => 'pass', 'alice' => 'wolf'];
 $maxMemUsageMsgToDisk = 50000 * 1024 * 1024;
 $setmem = $log = $del = $memUsage = $action = $needAuth = 0;
 
-$taskWorkers = 2;//$_ENV['taskWorkers'] ?? 2;
-$nbChannels = 30;//$_ENV['nbChannels'] ?? 30;
+$taskWorkers = 1;//$_ENV['taskWorkers'] ?? 2;
 $nbAtomics = 0;// non nécessaires ici //$_ENV['nbAtomics'] ?? 100;
 $binSize = strlen(bindec(max($nbChannels, $nbAtomics)));
-$capacityMessagesPerChannel = 90;//$_ENV['chanCap'] ?? 90;
-$maxSuscribersPerChannel = 200;//$_ENV['subPerChannel'] ?? 200;
+
 $_ENV['gt'] = [];
 
 
@@ -88,19 +95,21 @@ if (1) {
     };
 
     $rea = ceil($reaktors); //(swoole_cpu_num() * $reaktors);
-    $wor = ceil($workers);  //(swoole_cpu_num() * $workers);
-    if ($wor < $rea) $wor = $rea;
-    echo "\nMaster:" . \getmypid() . ":Rea:$rea,wor:$wor";
+    $nbWorkers = ceil($workers);  //(swoole_cpu_num() * $workers);
+    if ($nbWorkers < $rea) $nbWorkers = $rea;
+    echo "\nMaster:" . \getmypid() . ":Rea:$rea,wor:$nbWorkers";
     $options = [//  https://www.swoole.co.uk/docs/modules/swoole-server/configuration
+        'heartbeat_idle_time' => $hbIdle,/*10 min*/
+        'heartbeat_check_interval' => $hbCheckEach,// leads to some workers timeouts errors
         //$socket>setOption(SOL_SOCKET, SO_REUSEPORT, true)
-        'reactor_num' => $rea,
-        'worker_num' => $wor,
+        'reactor_num' => (int)$rea,
+        'worker_num' => (int)$nbWorkers,
         // LimitNOFILE=100000
         // swoole WARNING	Server::accept_connection(): accept() failed, Error: Too many open files[24]
         //'daemonize' => 1,
         'log_file' => '/dev/null', 'log_level' => 5,//SWOOLE_LOG_INFO,
         'max_request' => 0,
-        'dispatch_mode' => 2,//Fixed fd per process : 7 : use idle, 1 : async and non blocking
+        'dispatch_mode' => 2,// Fixed fd per process : 7 : use idle, 1 : async and non blocking
         'discard_timeout_request' => false,
         'tcp_fastopen' => true,
         'open_tcp_nodelay' => true,
@@ -132,7 +141,7 @@ class wsServer
 
     function db($x, $level = 9, $minLogLevel = 1)
     {
-        return;
+        //return;
         if ($level > 98) ;
         elseif (!$this->log) return;
         elseif ($level < $minLogLevel) return;
@@ -320,14 +329,20 @@ class wsServer
         }
         if (is_array($mess)) $mess = json_encode($mess);
         $success = 0;
-        while (!$success) {
+        while (!$success && $tries < 4) {// Caution : never get this stuck in a kind of loop or timeout ..
             $success = $this->server->push($fd, $mess);// or send
             if (!$success) {
                 $this->db('nosuccess sending ' . $mess . ' to ' . $fd . ' -- disconnected ?');
+                $tries++;
                 sleep(1);
             }
-            $this->db('sentto:' . $fd);
         }
+        if (!$success) {
+            $this->busy($this->pid . ',' . $fd, $fd);
+            $this->rem('participants', $fd);
+            return;
+        }
+        $this->db('sentto:' . $fd);
         $this->r()->set('lastSent',time());
         $this->r()->incr('nbSend');
         return;
@@ -351,6 +366,7 @@ class wsServer
         $sender = $frame->fd;
         $himself = $this->pid . ',' . $sender;
         $this->db("query from {$sender}: {$frame->data}", 1);
+
         if (substr($frame->data, 0, 1) == '{' and substr($frame->data, -1) == '}') {
             $s = $a = 0;
             $j = json_decode($frame->data, true);
@@ -678,10 +694,10 @@ class wsServer
 
     function r()
     {
-        global $wor;
+        global $nbWorkers;
         if ($this->redis) return $this->redis;
-        if ($wor == 1) {
-            echo"\nPhpArray";
+        if ($nbWorkers == 1) {
+            echo"\nPhpArray:1 worker";
             $_ENV['__a'] = $this->redis = new r1();
         } else {
             echo"\nAtoRedis";
@@ -745,9 +761,9 @@ class wsServer
 
 
                 register_shutdown_function(function () {
-                    global $wor;
+                    global $nbWorkers;
                     echo"\nShutdown";
-                    if ($wor == 1) {
+                    if ($nbWorkers == 1) {
                         file_put_contents('swoole.1worker.dump.json', json_encode($this->r()->dump()));
                     }
 
@@ -905,11 +921,11 @@ class wsServer
             $server->on('start', function (Server $server) use ($p) { // Le serveur uniquement, pas les workers
                 echo"\nss:".getmypid();
 
-                global $swooleTableStringMaxSize, $nbReferences, $nbChannels, $nbAtomics, $nbWorkers, $capacityMessagesPerChannel, $binSize, $wor, $listTableNb, $listTableNbMaxSize;
+                global $swooleTableStringMaxSize, $nbReferences, $nbChannels, $nbAtomics, $nbWorkers, $capacityMessagesPerChannel, $binSize, $nbWorkers, $listTableNb, $listTableNbMaxSize;
                 //$this->r()->incr('sStart');//nbOpened,nbClosed,serverError,sMessage,sStart
                 $this->db("\t\t\t" . \getmypid() . '/' . $this->uuid . '::started::the parent process');// Doit en avoir un seul
 
-                if ($wor > 1) {
+                if ($nbWorkers > 1) {
                     $_ENV['atomics'] = ['received' => new Swoole\Atomic(),
                         'occupiedChannels' => new Swoole\Atomic(),
                         'connectedConsumers' => new Swoole\Atomic(),

@@ -1,6 +1,4 @@
 <?php
-// Coroutine http client
-// ps -ax|grep max4|grep -v grep|wc -l
 chdir(__dir__);
 require_once '../common.php';
 ini_set('display_errors', 1);
@@ -13,18 +11,16 @@ use Swoole\Coroutine\Http\Client;
 use function Swoole\Coroutine\Run;
 
 chdir(__dir__);
-$to = 60;//read timeout does the whole difference
-
 $pid = getmypid();
 $errorExitCode = 69;
 $okExitCode = 1;
-$finalOk=$b=$waits=$exit = $e = $tentative = $nbReplies=0;
+$to = 10;
+$exit = $e = $tentative = 0;
 $log=[];
-$expectedRepliesNb=99;
 
 try {
     $success = Run(function () use ($argv) {
-        global $e, $tentative, $to, $log, $cli, $pid,$exit, $errorExitCode, $okExitCode, $finalOk;
+        global $e, $tentative, $to, $log, $cli, $pid,$exit, $errorExitCode, $okExitCode;
         $log = [$pid];
         $z = $argv;
         array_shift($z);
@@ -45,6 +41,29 @@ try {
         $total = 9;
 
         if ($argv[1]) $port = $argv[1];
+        if (in_array($port,['test','restart'])) {//  php max4.php test shiva.devd339.dev.infomaniak.ch 80
+            //echo json_encode($argv);
+            $_ENV['cli'] = $cli = new Client($argv[2], $argv[3]);
+            $cli->set(['timeout' => 10, 'connect_timeout' => 10, 'write_timeout' => 10, 'read_timeout' => 10,
+                //'open_tcp_nodelay' => true,
+            ]);
+            $cli->upgrade('/');
+            $res[] = read('start', $e);
+            if ($e) return;
+            if($port=='restart'){$cli->push(json_encode(['restart' => 1]));$exit=1;return;}// User defined signal 2
+
+            //$cli->push(json_encode(['queue' => 'ye', 'msg' => 'yeah-men' . time()]));
+            $cli->push(json_encode(['dump' => 1]));
+            $res = read('dump', $e);
+            if ($e) return;
+            $log = $res;
+            return;
+            die($okExitCode);
+            throw new ExitException($okExitCode);
+            Swoole\Process::exit($okExitCode);
+            die();
+        }
+
         if (isset($argv[2])) $nb = $argv[2];
         if (isset($argv[3])) $total = $argv[3];
         if (isset($argv[4])) $host = $argv[4];
@@ -77,29 +96,25 @@ try {
                 $_ENV['cli'] = $cli = new Client($host, $port);
                 $cli->set(['timeout' => $to, 'connect_timeout' => $to, 'write_timeout' => $to, 'read_timeout' => $to,/*  'open_tcp_nodelay' => true, */]);
                 $cli->upgrade('/');
+                $log[] = '->conn';
                 $try = $x = $e = 0;
-                $b = microtime(true);
-                $x = read('opened:' . $try, $e, 10);// x=opened
-// #36668:1:{"push":"ye","message":"-yeMessagContains:36668-653630e60e596"}, err:8504,websocket handshake failed, cannot push data--1698050278
-                if (!$x || $e) {
-                    break;// Bypasser
-                }
-
-                while (0 && !$x) {
+                while (!$x) {
+                    $x = read('w:' . $try, $e);
+                    if ($e) {
+                        $x = 1;
+                        continue;// Bypasser
+                    }
                     $try++;
                     if ($try > 10) {
-                        $e = 'too much connection tries';
+                        $e = 'too much tries';
                     }
                     sleep(1);
                 }
-
                 if ($e) continue;//fail 2 connect
-
 
                 $res['welcome'] = $x;
                 $j = json_decode($x, 1);
                 $_ENV['fd'] = $j['id'];
-                $log[] = 'cok:'.$j['id'];
 
                 if ($hearbeats) {
                     pcntl_signal(SIGALRM, function () use ($eachNSeconds, $cli, $fini) {
@@ -117,74 +132,42 @@ try {
 
                 $finalOk = 0;
                 $last = '{"free":"1"}';
-                $discussion = ['{"push":"' . $pushes . '","message":"-' . $pushes . 'MessagContains:' . $pid . '-' . uniqid() . '"}', '{"status":"free"}', '{"suscribe":"' . $receives . '"}', $last];//,'{"status":"free"}','{wait:}' => la TX du message peut avoir lieu bien après
-                $nbReplies = 0;
-                $expectedRepliesNb = count($discussion);
+                $discussion = ['{"push":"' . $pushes . '","message":"' . $pushes . 'MessagContains:' . $pid . '-' . uniqid() . '"}', '{"status":"free"}', '{"suscribe":"' . $receives . '"}', $last];//,'{"status":"free"}','{wait:}' => la TX du message peut avoir lieu bien après
                 foreach ($discussion as $q) {
+                    $b = microtime(1);
                     $waits = 0;
                     if ($q == $last) $r->incr('last');
-                    try{
-                        $cli->push($q);//$res[$q.((microtime(true)-$a)*1000)]='pushed';
-                    } catch (\throwable $e) {
-                        $log[] = $e->getMessage();
-                    }
-                    $b = microtime(true);
-                    $x = read($q, $e, 4);
-
-                    if($e) {
-                        $error = $cli->errCode;
-                        if ($error == 60) {
-                            $a = ceil(microtime(true) - $b / 1000);
-                            echo '::' . $a;
-                            fpc('err.log', "\nC:" . getmypid() . '=>' . $a, 8);
-                            continue;
-                        }
-                        if ($e) {// #36668:1:{"push":"ye","message":"-yeMessagContains:36668-653630e60e596"}, err:8504,websocket handshake failed, cannot push data--1698050278
-                            fpc('err.log', "\nC:" . getmypid() . '=>' . $cli->errMsg.':'.json_encode($e), 8);
-                            echo ',';
-                            continue;
-                            break;//  Last Waits here for something to show up, is this blocking ?
-                        }
-                    }
+                    $cli->push($q);//$res[$q.((microtime(1)-$a)*1000)]='pushed';
+                    $x = read($q, $e);
+                    if ($e) break;//  Last Waits here for something to show up, is this blocking ?
                     if (!$x) {
                         fpc('8.log', "\nC:" . $pid . "nosuccess:" . $cli->errCode, 8);//8504
                         continue;
                     }
 
-                    while ($q == $last and !strpos($x, 'MessagContains')) {// Waits for the last message
+                    while ($q == $last and !strpos($x, 'MessagContains')) {//Waits for the last message
                         $waits++;
-                        $cli->push(json_encode(['keepalive' => 1]));$b=microtime(true);
-                        $x = read('w:' . $waits, $e, 5);// Not behaving any better
+                        $cli->push(json_encode(['keepalive' => 1]));//
+                        $x = read('free:' . $waits, $e);// Not behaving any better
                         if ($e) {
                             if (1 or $waits > 7) {
                                 $x = '---MessagContains';
                                 continue;
                             }
                             $e = null;
-                        } elseif ($x) {// 2
-                            if ($x != '{"keepalive":1}' && !strpos($x, $receives)) {// keepalive
-                                echo"\n unexpected : ".$x;
-                                $log[] = 'notExpectedMsg:'.$x;
-                            }
-                        }
-                        echo'.';
+                        }//2
                         // {"free":"1"}:err:Operation timed out
                         sleep(1);
                     }
-
                     if ($e) break;
+
                     if ($waits) $log[] = 'waits:' . $waits;
                     if ($q == $last) {
-                        if (!strpos($x, $receives)) {
-                            $log[] = 'notExpectedMsg:'.$x;//                    $finalOk = 1;
-                        }
                         $finalOk = 1;
                         //$log[] = $x;
                     }
-                    $res[$q . '::' . round(((microtime(true) - $b) * 1000), 0) . 'ms'] = $x;
+                    $res[$q . '::' . round(((microtime(1) - $b) * 1000), 0) . 'ms'] = $x;
                 }
-
-
                 if ($e) continue;
 
                 $res = array_filter($res);
@@ -209,8 +192,7 @@ try {
                     $cli->push(json_encode(['incr' => 'nbCompleted']));
                     $cli->close();
                     unset($cli);
-                    $finalOk=1;
-                    $log[] = 'ok,scenarioComplete';//                    $finalOk = 1;
+                    $log[] = 'ok';//                    $finalOk = 1;
                     return;
                     Swoole\Process::exit($okExitCode);
                 }
@@ -229,10 +211,6 @@ try {
             }
         }
     });
-
-    if($finalOk){
-        die('+');
-    }
     if ($log and is_array($log)) {
         echo "\n" . implode(',', $log);
     } else {
@@ -292,37 +270,14 @@ function fpc($f, $d, $fla = null)
     echo "\n" . trim($d);
 }
 
-function read($reason = '', &$error = 0, $nbRetries = 0, $essai = 0)
+function read($reason = '', &$error = 0)
 {
-    global $tentative, $log, $pid, $cli, $exit, $expectedRepliesNb, $nbReplies, $waits, $b;
-    if ($essai > $nbRetries) {
-        echo "\n#$pid:essai:$essai;".implode(',',$log);
-        $cli->close();die;
-    }
+    global $tentative, $log, $pid, $cli, $exit;
     $x = $cli->recv();
-    $nbReplies++;
-    if (($nbReplies + $waits ) > $expectedRepliesNb) {
-        echo "\n$pid:$nbReplies > $expectedRepliesNb,$tentative:$reason:err:". time()." :: ".trim($x->data);
-    }// $x->data == 'opened'
     if ($cli->errCode) {//      websocket handshake failed, cannot push data
-        $error = $cli->errCode;// err=60
-        $a = ceil(microtime(true) - $b);
-        if (strpos($reason, 'opened:') === 0) {
-            $log[] = 'cnt:' . $a;
-        }else{
-            $log[] = $reason.','.$cli->errCode.','. $cli->errMsg.','.$a;
-        }
-
-        if ($nbRetries) {
-            sleep(1);
-            $b=microtime(true);
-            return read($reason, $error, $nbRetries, $essai + 1);
-        }
-
-        if ($error == 8504) {
-            $log[]=$error;return null;
-        }
-
+        $error = $cli->errCode;
+        $log[] = $cli->errMsg;
+        echo "\n$pid:$tentative:$reason:err:" . $cli->errCode . ',' . $cli->errMsg . '--' . time();
         $cli->close();
         $exit = 69;
         return null;

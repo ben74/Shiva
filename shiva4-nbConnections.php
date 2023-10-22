@@ -1,9 +1,10 @@
 <?php
 /*
- * php ../shiva4-nbConnections.php responseAsap=1&
+ * php ../shiva4-nbConnections.php responseAsap=1 &
  * php --ri openswoole | grep version
+ * ps -ax|grep shiva|grep -v grep|wc -l
  */
-$maxConn = 10240;
+$maxConn = 300;//10240; -> opens more processes
 $nbChannels = 30;
 $reaktors = $workers = 1;
 $maxConn = $backlog = 900;
@@ -11,7 +12,7 @@ $tick = 20000000;// tick each 20 sec .. only on first Process .. Evaluates pendi
 
 
 $listTableNb = 900;
-$swooleTableStringMaxSize = $listTableNbMaxSize = 9000;// participants, suscribers, free, pending: => intercepted to channel on rpush
+$swooleTableStringMaxSize = $listTableNbMaxSize = 9000;// participants, suscribers, free, pending: => intercepted to channel o
 
 
 $pvc = $salt = '';
@@ -27,7 +28,7 @@ $pass = ['bob' => 'pass', 'alice' => 'wolf'];
 $maxMemUsageMsgToDisk = 50000 * 1024 * 1024;
 $setmem = $log = $del = $memUsage = $action = $needAuth = 0;
 
-$taskWorkers = 2;//$_ENV['taskWorkers'] ?? 2;
+$taskWorkers = 1;//$_ENV['taskWorkers'] ?? 2;
 //$_ENV['nbChannels'] ?? 30;
 $nbAtomics = 0;// non nécessaires ici //$_ENV['nbAtomics'] ?? 100;
 $binSize = strlen(bindec(max($nbChannels, $nbAtomics)));
@@ -63,13 +64,16 @@ if (1) {
     };
 
     $rea = ceil($reaktors);#(swoole_cpu_num() * $reaktors);
-    $wor = ceil($workers);#(swoole_cpu_num() * $workers);
-    if ($wor < $rea) $wor = $rea;
-    echo "\nMaster:" . \getmypid() . ":Rea:$rea,wor:$wor";
+    $nbWorkers = ceil($workers);#(swoole_cpu_num() * $workers);
+    if ($nbWorkers < $rea) $nbWorkers = $rea;
+    echo "\nMaster:" . \getmypid() . ":Rea:$rea,wor:$nbWorkers";
 
     $options = [//  https://www.swoole.co.uk/docs/modules/swoole-server/configuration
+        'heartbeat_idle_time' => 600000,
+        'heartbeat_check_interval' => 60,// leads to some workers timeouts errors
+
         'reactor_num' => $rea,
-        'worker_num' => $wor,
+        'worker_num' => $nbWorkers,
         'max_request' => 0,
         'discard_timeout_request' => true,
         'input_buffer_size' => 2097152,
@@ -98,9 +102,7 @@ if (1) {
         //'daemonize' => 1,
         'log_file' => '/dev/null',//sw.log - output with daemonize
         'log_level' => 0,//SWOOLE_LOG_INFO,
-        'ping_timeout' => 6000000,
-        'heartbeat_idle_time' => 600000,
-        'heartbeat_check_interval' => 60,
+        //'ping_timeout' => 6000000,
         /*
         'request_slowlog_file' => 'slow.log',
         'request_slowlog_timeout' => 2,
@@ -108,7 +110,7 @@ if (1) {
         */
     ];
 
-    $options = [];// No options : all scenarios ok :)
+    //$options = [];// No options : all scenarios ok :)
 }
 echo "\n" . json_encode($options);
 
@@ -168,7 +170,9 @@ class wsServer
             $this->db(['wtr?', debug_backtrace(-2)], 99);
             return;
         }
-        if (is_array($mess)) $mess = json_encode($mess);
+        if (is_array($mess)) {
+            $mess = json_encode($mess);
+        }
         $success = 0;
         while (!$success) {
             $success = $this->server->push($fd, $mess);// or send
@@ -191,9 +195,9 @@ class wsServer
 
     function r()
     {
-        global $wor;
+        global $nbWorkers;
         if ($this->redis) return $this->redis;
-        if ($wor == 1 or 1152) {
+        if ($nbWorkers == 1 or 1152) {
             $_ENV['__a'] = $this->redis = new r1();
         } else {
             $_ENV['__a'] = $this->redis = new AtomicRedis();
@@ -214,8 +218,8 @@ class wsServer
                 //  \Swoole\Timer::tick($this->timer, [$this, 'processPendingInBackground'], ['timer']);
 
                 register_shutdown_function(function () {
-                    global $wor;
-                    if ($wor == 1) {
+                    global $nbWorkers;
+                    if ($nbWorkers == 1) {
                         file_put_contents('swoole.1worker.dump.json', json_encode($this->r()->dump()));
                     }
 
@@ -352,11 +356,11 @@ class wsServer
 
             $server->on('start', function (Server $server) use ($p) {
                 echo "\nStart";
-                global $swooleTableStringMaxSize, $nbReferences, $nbChannels, $nbAtomics, $nbWorkers, $capacityMessagesPerChannel, $binSize, $wor, $listTableNb, $listTableNbMaxSize;
+                global $swooleTableStringMaxSize, $nbReferences, $nbChannels, $nbAtomics, $nbWorkers, $capacityMessagesPerChannel, $binSize, $nbWorkers, $listTableNb, $listTableNbMaxSize;
                 $this->r()->incr('sStart');//sOpen,sClose,serverError,sMessage,sStart
                 $this->db("\t\t\t" . \getmypid() . '/' . $this->uuid . '::started::the parent process');// Doit en avoir un seul
 
-                if ($wor > 1 and 'onServerStart if more than 1 worker, rely on Atomic and Tables') {// so each worker reference the same atomic space in order to keep the right numbers
+                if ($nbWorkers > 1 and 'onServerStart if more than 1 worker, rely on Atomic and Tables') {// so each worker reference the same atomic space in order to keep the right numbers
                     $_ENV['atomics'] = [
                         'received' => new Swoole\Atomic(),
                         'occupiedChannels' => new Swoole\Atomic(),
@@ -365,12 +369,13 @@ class wsServer
                     // 'process:server' => new Swoole\Atomic(), 'process:manager' => new Swoole\Atomic()];
                     $_ENV['tables'] = $_ENV['channels'] = $_ENV['workerAtomics'] = [];
 
-                    $_ENV['listTable'] = new Swoole\Table($listTableNb);
+                    $_ENV['listTable'] = new Swoole\Table($listTableNb);// todo : l'ajout d'une table ( listTable[] )permettrait t-elle .. ??
                     $_ENV['listTable']->column('v', Swoole\Table::TYPE_STRING, $listTableNbMaxSize);// rows
 
                     $_ENV['rkv'] = new Swoole\Table($nbReferences);
                     $_ENV['rkv']->column('v', Swoole\Table::TYPE_STRING, $swooleTableStringMaxSize);
                     $_ENV['rkv']->create();
+
                     if ('Affecter 30 channels libres -> un nom vers un identifiant afin de savoir rapidement le nb de message dedans') {
                         // is an array
                         $_ENV['rkv']->set('freeChannels', ['v' => json_encode(range(0, $nbChannels - 1))]);
@@ -403,10 +408,10 @@ class wsServer
 
                     }
 if('afin de permettre le mapping'){
-                    $_ENV['ref'] = new Swoole\Table($nbReferences);
+    $_ENV['ref'] = new Swoole\Table($nbReferences);
 //$_ENV['ref']->column('e', Swoole\Table::TYPE_STRING, 1);// a:atomic,c:channel
-                    $_ENV['ref']->column('v', Swoole\Table::TYPE_INT, $binSize);// 8:256 values
-                    $_ENV['ref']->create();
+    $_ENV['ref']->column('v', Swoole\Table::TYPE_INT, $binSize);// 8:256 values
+    $_ENV['ref']->create();
 }
                 }
 
@@ -606,8 +611,8 @@ class r1
     }
 }
 
-class AtomicRedis
-{ // when num workers > 1
+class AtomicRedis // when more than single worker
+{
     function getChannelId($channelName)
     {// Casts channel name to slot
         if (!$_ENV['ref']->exists($channelName)) {
