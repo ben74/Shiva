@@ -20,6 +20,10 @@ Pb : lance 3 processus ...
 
     - Simplicité du système, si un worker -> référence mémoire php directe
 */
+function anomaly(){
+    $xdebugBreackPoint=1;
+}
+$supAdmin=$debug=0;
 
 $tick = 20000000;// tick each 20 sec :: backup tables to disk
 
@@ -137,11 +141,11 @@ $sw = new wsServer($p, $options, $needAuth, $tokenHashFun, $pass, $log, $timerMs
 
 class wsServer
 {
-    public $log, $timer, $bgProcessing = false, $tokenHashFun, $passworts = [], $needAuth = false, $uuid = 0, $parentPid = 0, $server, $redis, $pid = 0, $frees = [], $pendings = 0, $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [], $tick = 20000000;// 20 sec in microseconds here for heartbeat:: keep connection alive
+    public $log, $timer, $bgProcessing = false, $tokenHashFun, $needAuth = false, $uuid = 0, $parentPid = 0, $server, $redis, $pid = 0, $pendings = 0, $passworts = [], $frees = [], $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [], $tick = 20000000;// 20 sec in microseconds here for heartbeat:: keep connection alive
 
     function db($x, $level = 9, $minLogLevel = 1)
     {
-        //return;
+        return;
         if ($level > 98) ;
         elseif (!$this->log) return;
         elseif ($level < $minLogLevel) return;
@@ -149,25 +153,23 @@ class wsServer
         file_put_contents('3.log', "\nS:" . \getmypid() . ':' . $x, 8);
     }
 
-    function restart(){// Todo : doesn't work as expected, the connections remains in timeout
-
+    function restart($dump = false)
+    {// Todo : doesn't work as expected, the connections remains in timeout
         $this->bgProcessing=time();
-        $x=$this->r()->dump();
-        unset($x['participants'],$x['p2h'],$x['sentAsapToFd'],$x['messagesSentToFdOnBackground']);//dont care ... no care, just need the pending
-        foreach($x as $k=>&$v){if(substr($k,0,4)=='pid2')$v=null;}unset($v); $x=array_filter($x);
-
-        // just need pending ones
-
-        file_put_contents('backup.json',json_encode($x));
-        $this->frees=[];$this->r()->del('free');
+        if($dump){
+            $x=$this->r()->dump();//dont care ... no care, just need to export the pending Messages ....
+            unset($x['participants'],$x['p2h'],$x['sentAsapToFd'],$x['messagesSentToFdOnBackground']);
+            foreach($x as $k=>&$v){if(substr($k,0,4)=='pid2')$v=null;}unset($v); $x=array_filter($x);
+            // just need pending ones btw
+            file_put_contents('backup.json',json_encode($x));
+        }
+        $this->passworts = $this->frees = $this->conn =$this->clients = $this->fdIs = $this->h2iam =$this->pool = $this->fd2sub = $this->auths = $this->ticks = [];
         $this->server->stop(-1);$this->server->start();
-
         //    pr kill -USR1 MASTER_PID
-
-
         //$this->server->reload(true);//User defined signal 2
         $this->bgProcessing=false;
-        echo"\nrestarted";
+        gc_collect_cycles();// where sould be that memLeak be located at???
+        echo"\nrestarted:".memory_get_usage();// _ENV['_a']
         return;
     }
 
@@ -321,7 +323,7 @@ class wsServer
         return $ret;
     }
 
-    function send($fd, $mess, $plus = '')
+    function send($fd, $mess, $plus = '', $tagAsSent = true)
     {
         if (!$fd) {
             $this->db(['wtr?', debug_backtrace(-2)], 99);
@@ -338,13 +340,15 @@ class wsServer
             }
         }
         if (!$success) {
-            $this->busy($this->pid . ',' . $fd, $fd);
-            $this->rem('participants', $fd);
-            return;
+			$this->r()->incr('nbRetriedSendFailures');
+            $this->onClose($this->server,$fd);
+			return;//$this->busy($this->pid . ',' . $fd, $fd);$this->rem('participants', $fd);return;
         }
         $this->db('sentto:' . $fd);
-        $this->r()->set('lastSent',time());
-        $this->r()->incr('nbSend');
+        if ($tagAsSent) {
+            $this->r()->set('lastSent', time());
+			$this->r()->incr('nbSend');
+		}
         return;
     }
 
@@ -358,10 +362,34 @@ class wsServer
 
     }
 
+    function onClose($server, $fd) {
+		//$server->on('close', function ($server, $fd) {
+		$this->r()->decr('nbConnectionsActives');
+		$this->r()->incr('nbClosed');//nbOpened,nbClosed,serverError,sMessage
+		$this->pool = array_diff($this->pool, [$fd]);
+		$himself = $this->pid . ',' . $fd;
+		if (isset($this->h2iam[$himself])) {
+			$iam = $this->h2iam[$himself];
+			//echo"\nClosedI:".$iam;
+			$this->r()->Hdel('iam', $iam);
+			unset($this->fdIs[$himself]);
+		} else {
+			//echo"\nClosed:".$fd.','.time();
+		}
+		$suscribtions = $this->r()->lrange('pid2sub:' . $himself, 0, -1);
+		foreach ($suscribtions as $sub) {
+			$this->rem('suscribers:' . $sub, $himself);
+		}
+		$this->r()->del('pid2sub:' . $himself);
+		$this->busy($himself, $fd);
+		$this->rem('participants', $himself);
+		$this->db("connection close: {$fd}", 2);
+	}
+
     function onMessage($server, $frame)
     {
         global $maxMemUsageMsgToDisk, $pvc;
-        if(!$this->r()->exists('firstMessage'))$this->r()->set('firstMessage',time());
+        $this->r()->setIfNull('firstMessage',time());
         $this->r()->incr('nbMessages');
         $sender = $frame->fd;
         $himself = $this->pid . ',' . $sender;
@@ -423,7 +451,7 @@ class wsServer
                 }
             }
 
-            if (isset($j['restart'])) {return $this->restart();}
+
             if (isset($j['lpop'])) {return $this->send($sender,$this->r()->lpop($j['lpop']));}
             if (isset($j['rpop'])) {return $this->send($sender,$this->r()->rpop($j['rpop']));}
             if (isset($j['get'])) {return $this->send($sender,$this->r()->get($j['get']));}
@@ -433,19 +461,32 @@ class wsServer
             if (isset($j['rpush'])and isset($j['v'])) {return $this->r()->rpush($j['rpush'],$j['v']);}
             if (isset($j['lpush'])and isset($j['v'])) {return $this->r()->lpush($j['lpush'],$j['v']);}
 
+            if($GLOBALS['supAdmin']){
+                if (isset($j['xdebug'])) {
+                    anomaly();
+                    $this->send($sender,['Amem'=>memory_get_usage()],'',false);
+                }
+                if (isset($j['reset'])) {
+                    $this->r()->reset();
+                    file_put_contents('backup.json',json_encode([]));
+                    $this->restart(false);
+                    gc_collect_cycles();/* todo :: pas terrible */ $j['dump']=1;
+                }
+                if (isset($j['restart'])) { $this->restart(true);$this->send($sender,['restarted'=>1,'Amem'=>memory_get_usage()],'',false);}
 
-
-            if (isset($j['dump'])) {
-                $x = $this->r()->dump();
-                foreach($x as $k=>&$v){if(substr($k,0,4)=='pid2')$v=null;}unset($v); $x=array_filter($x);
-                $x['Amem']=memory_get_usage();if(!$x['free'])$x['free']=[];
-                $x['nbFree']=count($x['free']);
-                $x['time']=$_ENV['gt'];
-                $x['Atime']=$x['lastSent']-$x['firstMessage'];
-                unset($x['participants'],$x['p2h'],$x['sentAsapToFd'],$x['messagesSentToFdOnBackground']);//dont care ... no care,
-                $this->send($sender, json_encode($x));
-                return;
+                if (isset($j['dump'])) {
+                    $x = $this->r()->dump();
+                    foreach($x as $k=>&$v){if(substr($k,0,4)=='pid2')$v=null;}unset($v); $x=array_filter($x);
+                    $x['Amem']=memory_get_usage();if(!$x['free'])$x['free']=[];
+                    $x['nbFree']=count($x['free']);
+                    $x['time']=$_ENV['gt'];
+                    $x['Atime']=$x['lastSent']-$x['firstMessage'];
+                    unset($x['participants'],$x['p2h'],$x['sentAsapToFd'],$x['messagesSentToFdOnBackground']);//dont care ... no care,
+                    $this->send($sender, $x, 'dump', false);
+                    return;
+                }
             }
+
             if (isset($j['rk'])) {
                 $this->send($sender, $this->rgg($j['rk']));
                 return;
@@ -561,6 +602,7 @@ class wsServer
                     $this->send($fd, ['sendto' => $j['sendto'], 'message' => $j['message']]);
                     $this->send($sender, 'ok:' . __line__);
                 } elseif (isset($j['push'])) {
+                    $this->r()->setIfNull('firstPush',time());
                     $this->r()->incr('nbPushed');
                     $a = 1;
                     $s++;
@@ -836,7 +878,7 @@ class wsServer
                     $this->db('timer');
                 });
                 $server->on('connect', function (Server $server,$fd) use ($p) {
-                    echo"\nConnect:".$fd.':'.time();
+                    //echo"\nConnect:".$fd.':'.time();
                     $this->db('connect');
                 });
                 $server->on('shutdown', function (Server $server,$fd) use ($p) {  echo"\nShutdown:".time();  });
@@ -881,42 +923,20 @@ class wsServer
             //*/
             //$server->on('handshake', [$this, 'handshake']);
             $server->on('message', [$this, 'onMessage']);
+            $server->on('close', [$this, 'onClose']);
             $server->on('open', function ($server, $req) {
-                $a=microtime(true)*1000;
+                if($GLOBLAS['debug']){$a=microtime(true)*1000;}
                 //$this->childProcess('open');
-                $this->r()->incr('nbConnectionsNonFermees');//nbOpened,nbClosed,serverError,sMessage
+                $this->r()->incr('nbConnectionsActives');//nbOpened,nbClosed,serverError,sMessage
                 $this->r()->incr('nbOpened');//nbOpened,nbClosed,serverError,sMessage
                 $this->add('participants', $this->pid . ',' . $req->fd);
                 $this->pool[] = $req->fd;
                 $this->db("connection open: {$req->fd}", 2);
-                $a=round((microtime(true)*1000)-$a);
-                if($a>100)echo"\n".$a;
+                if($GLOBLAS['debug']){$a=round((microtime(true)*1000)-$a);if($a>100)echo"\n".$a;}// todo: connection took too much fucking time
                 //echo "\n" . '{"pid":' . $this->pid . ',"id":' . $req->fd . '}';
-                $this->send($req->fd, '{"pid":' . $this->pid . ',"id":' . $req->fd . '}');//so he knows who he actually is
+                $this->send($req->fd, '{"pid":' . $this->pid . ',"id":' . $req->fd . '}', 'pid', false);//so he knows who he actually is
             });
 
-            $server->on('close', function ($server, $fd) {
-                $this->r()->decr('nbConnectionsNonFermees');
-                $this->r()->incr('nbClosed');//nbOpened,nbClosed,serverError,sMessage
-                $this->pool = array_diff($this->pool, [$fd]);
-                $himself = $this->pid . ',' . $fd;
-                if (isset($this->h2iam[$himself])) {
-                    $iam = $this->h2iam[$himself];
-                    //echo"\nClosedI:".$iam;
-                    $this->r()->Hdel('iam', $iam);
-                    unset($this->fdIs[$himself]);
-                } else {
-                    //echo"\nClosed:".$fd.','.time();
-                }
-                $suscribtions = $this->r()->lrange('pid2sub:' . $himself, 0, -1);
-                foreach ($suscribtions as $sub) {
-                    $this->rem('suscribers:' . $sub, $himself);
-                }
-                $this->r()->del('pid2sub:' . $himself);
-                $this->busy($himself, $fd);
-                $this->rem('participants', $himself);
-                $this->db("connection close: {$fd}", 2);
-            });
 
             $server->on('start', function (Server $server) use ($p) { // Le serveur uniquement, pas les workers
                 echo"\nss:".getmypid();
@@ -1023,18 +1043,46 @@ class wsServer
 
     function __call($method, $arguments)
     {
-        $a = 1;
+        anomaly();
     }
 }
 
 class r1
 {// relies on simplest php data array ever
-    public $a = [];
+    public $a = ['nbConnectionsActives' => 0, 'nbOpened' => 0, 'nbClosed' => 0];//,'lastSent'=>time()
+
+    function reset()// todo:devOnly
+    {
+        $this->a = ['nbConnectionsActives' => 0, 'nbOpened' => 0, 'nbClosed' => 0];
+        return;
+        foreach ($this->a as $k => &$v) {
+            if (is_array($v)) {
+                $v = [];
+            } elseif (in_array(gettype($v), ['integer', 'float', 'double'])) {
+                $v = 0;
+            } elseif (in_array(gettype($v), ['string'])) {
+                $v = '';
+            } else {
+                anomaly();
+            }
+        }
+        unset($v);
+    }
+
+    function setIfNull($k, $v)
+    {
+        if (!$this->exists($k)) {
+            return $this->set($k, $v);
+        }
+    }
+
     function setNX($k,$v){
 
     }
+
     function dump()
     {
+        $this->a['testtime'] = $this->get('lastSent') - $this->get('firstPush');
         return $this->a;
     }
 
@@ -1137,7 +1185,7 @@ class r1
     {
         if (!$this->a[$k]) $this->a[$k] = [];
         $this->a[$k] = array_diff($this->a[$k], [0 => $v]);
-        $a = 1;
+        //
     }
 
     function lRange($k, $from = 0, $to = -1)
@@ -1179,6 +1227,9 @@ class r1
 
 class AtomicRedis
 { // when num workers > 1
+    function reset(){
+        anomaly();
+    }
     function getChannelId($channelName)
     {// Casts channel name to slot
         if (!$_ENV['ref']->exists($channelName)) {
@@ -1325,7 +1376,7 @@ class AtomicRedis
     function keys($k)
     {
         if ($k == 'pending:*') return array_keys($_ENV['ref']);
-        $a = 1;
+        anomaly();
     }
 
     /*
@@ -1333,7 +1384,7 @@ class AtomicRedis
     */
     function __call($method, $arguments)
     {
-        $a = 1;
+        anomaly();
     }
 }
 

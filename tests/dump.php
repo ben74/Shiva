@@ -43,20 +43,22 @@ try {
         if ($argv[1]) $port = $argv[1];
         if (isset($argv[2])) $nb = $argv[2];
         if (isset($argv[3])) $total = $argv[3];
-        if (isset($argv[4])) $host = $argv[4];
+       if (isset($argv[4])) $host = $argv[4];
 
-        if (in_array($nb,['test','restart','dump'])) {//  php max4.php test shiva.devd339.dev.infomaniak.ch 80
-            //echo json_encode($argv);
-            $_ENV['cli'] = $cli = new Client($host, $port);
-            $cli->set(['timeout' => $to, 'connect_timeout' => $to, 'write_timeout' => $to, 'read_timeout' => $to,
-                //'open_tcp_nodelay' => true,
-            ]);
-            $cli->upgrade('/');
-            $res[] = read('start', $e);
+        if (in_array($nb, ['test', 'restart', 'dump', 'reset', 'xdebug'])) {//  php max4.php test shiva.devd339.dev.infomaniak.ch 80
+            $cli=$x=null;//echo json_encode($argv);
+            while(!$x){
+				if($cli){$cli->close();unset($cli);sleep(1);}
+				$_ENV['cli'] = $cli = new Client($host, $port);
+				$cli->set(['timeout' => $to, 'connect_timeout' => $to, 'write_timeout' => $to, 'read_timeout' => $to]);$cli->upgrade('/');
+				$res[] = $x=read('start', $e);
+			}
             if ($e) return;
             $cli->push(json_encode([$nb => 1]));
             $res = read($nb, $e);
-            //echo"\n".$res;
+            echo"\n".$res;
+            $cli->close();unset($cli);
+            return;
             $log = [$res];
             return;
             die($okExitCode);
@@ -64,71 +66,10 @@ try {
             Swoole\Process::exit($okExitCode);
             die();
         }
-die('nr');
-
-
-        $p1 = $p2 = 1;
-
-        $_ENV['r'] = $r = new \RedisFaker();
-        $finished = false;
-        while (!$finished) {
-            try {
-                if($exit)return;
-                //echo '.';
-                $tentative++;
-                if ($cli) {
-                    $cli->close();
-                    unset($cli);
-                }//1st failuremax4.php
-                $_ENV['cli'] = $cli = new Client($host, $port);
-                $cli->set(['timeout' => $to, 'connect_timeout' => $to, 'write_timeout' => $to, 'read_timeout' => $to,/*  'open_tcp_nodelay' => true, */]);
-                $cli->upgrade('/');
-                $try = $x = $e = 0;
-                while (!$x) {
-                    $b = microtime(true);
-                    $x = read('opened:' . $try, $e, 10);// x=opened
-// #36668:1:{"push":"ye","message":"-yeMessagContains:36668-653630e60e596"}, err:8504,websocket handshake failed, cannot push data--1698050278
-                    if (!$x || $e) {
-                        continue;// Bypasser
-                    }
-                    $try++;
-                    if ($try > 10) {
-                        $e = 'too much connection tries';
-                    }
-                    sleep(1);
-                }
-
-                $cli->push('{"dump":1}');//$res[$q.((microtime(true)-$a)*1000)]='pushed';
-                $x=read($q, $e);
-                //die($x);
-                $log = [$x];
-                echo $x;
-                return;
-                Swoole\Process::exit($okExitCode);
-            } catch (\Exception $e) {//   Fatal error: Uncaught Swoole\ExitException
-                if ($e->getMessage() == 60) {
-                    $renewConnection = 1;
-                }
-            } catch (Swoole\ExitException $e) {//   Fatal error: Uncaught Swoole\ExitException
-                $log[] = $e;
-                return $log;
-                return $e->getStatus();
-            } catch (\throwable $e) {
-                $log[] = $e;
-                return $log;
-                fpc('err.log', "\nC:" . $pid . '=>' . $e->getMessage(), 8);
-            }
-        }
+        echo $nb;
+		return;Swoole\Process::exit($exit);
     });
 
-    if($finalOk){
-        die('+');
-    }
-    if ($log and is_array($log)) {
-        echo "\n" . implode(',', $log);
-    } else {
-        echo $log;
-    }
 } catch (Swoole\ExitException $e) {//   Fatal error: Uncaught Swoole\ExitException
     return $e->getStatus();
 } catch (\throwable $e) {

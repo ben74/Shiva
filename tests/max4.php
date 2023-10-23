@@ -70,31 +70,17 @@ try {
                 if($exit)return;
                 //echo '.';
                 $tentative++;
-                if ($cli) {
-                    $cli->close();
-                    unset($cli);
-                }//1st failuremax4.php
-                $_ENV['cli'] = $cli = new Client($host, $port);
-                $cli->set(['timeout' => $to, 'connect_timeout' => $to, 'write_timeout' => $to, 'read_timeout' => $to,/*  'open_tcp_nodelay' => true, */]);
-                $cli->upgrade('/');
+                if ($cli) {$cli->close();unset($cli);sleep(1);}//1st failuremax4.php
+$_ENV['cli'] = $cli = new Client($host, $port);$cli->set(['timeout' => $to, 'connect_timeout' => $to, 'write_timeout' => $to, 'read_timeout' => $to,/*  'open_tcp_nodelay' => true, */]);$cli->upgrade('/');
                 $try = $x = $e = 0;
                 $b = microtime(true);
-                $x = read('opened:' . $try, $e, 10);// x=opened
+                $x = read('opened:' . $tentative, $e, 0);// x=opened
 // #36668:1:{"push":"ye","message":"-yeMessagContains:36668-653630e60e596"}, err:8504,websocket handshake failed, cannot push data--1698050278
-                if (!$x || $e) {
-                    break;// Bypasser
-                }
-
-                while (0 && !$x) {
-                    $try++;
-                    if ($try > 10) {
-                        $e = 'too much connection tries';
-                    }
-                    sleep(1);
+                while (!$x) {
+                    continue;// tentative ++;
                 }
 
                 if ($e) continue;//fail 2 connect
-
 
                 $res['welcome'] = $x;
                 $j = json_decode($x, 1);
@@ -109,7 +95,7 @@ try {
                         return;
                         $cli->push(json_encode(['hb' => time()]));
                         read('hb', $e);
-                        if ($e) return;;//Osef
+                        if ($e) return;//Osef
                         pcntl_alarm($eachNSeconds);// répéter l'interrogation récursivement
                     });
                     pcntl_alarm($eachNSeconds);// KeepAlive
@@ -117,7 +103,7 @@ try {
 
                 $finalOk = 0;
                 $last = '{"free":"1"}';
-                $discussion = ['{"push":"' . $pushes . '","message":"-' . $pushes . 'MessagContains:' . $pid . '-' . uniqid() . '"}', '{"status":"free"}', '{"suscribe":"' . $receives . '"}', $last];//,'{"status":"free"}','{wait:}' => la TX du message peut avoir lieu bien après
+                $discussion = ['{"push":"' . $pushes . '","message":"-' . $pushes . 'MessagContains:' . $pid . '-' . uniqid() . '"}'/*, '{"status":"free"}' */, '{"suscribe":"' . $receives . '"}', $last];//,'{"status":"free"}','{wait:}' => la TX du message peut avoir lieu bien après
                 $nbReplies = 0;
                 $expectedRepliesNb = count($discussion);
                 foreach ($discussion as $q) {
@@ -297,20 +283,20 @@ function read($reason = '', &$error = 0, $nbRetries = 0, $essai = 0)
     global $tentative, $log, $pid, $cli, $exit, $expectedRepliesNb, $nbReplies, $waits, $b;
     if ($essai > $nbRetries) {
         echo "\n#$pid:essai:$essai;".implode(',',$log);
-        $cli->close();die;
+        $cli->close();unset($cli);die;
     }
     $x = $cli->recv();
     $nbReplies++;
+    $a = ceil(microtime(true) - $b);
     if (($nbReplies + $waits ) > $expectedRepliesNb) {
-        echo "\n$pid:$nbReplies > $expectedRepliesNb,$tentative:$reason:err:". time()." :: ".trim($x->data);
+        echo "\n$pid:$nbReplies > $expectedRepliesNb,$tentative:$reason:err:". $a." :: ".trim($x->data);
     }// $x->data == 'opened'
     if ($cli->errCode) {//      websocket handshake failed, cannot push data
         $error = $cli->errCode;// err=60
-        $a = ceil(microtime(true) - $b);
         if (strpos($reason, 'opened:') === 0) {
             $log[] = 'cnt:' . $a;
-        }else{
-            $log[] = $reason.','.$cli->errCode.','. $cli->errMsg.','.$a;
+        } else {
+            $log[] = $reason.','.$error.','. $cli->errMsg.','.$a;
         }
 
         if ($nbRetries) {
