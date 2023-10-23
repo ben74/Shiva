@@ -23,16 +23,15 @@ if (0) {
     echo $counter->wait(1) . "\n";// waits 1 second, exact if another process wakes him up ( bypass this one )
 }
 //SET, WAIT, WAKEYP
-$capacity = 9000;
+$nbpush=$capacity = 9000;
 $chan = new Swoole\Coroutine\Channel($capacity);
 
-Co\run(function () use ($chan, $starts) {
+Co\run(function () use ($chan, $starts, $nbpush) {
 
-    go(function () use ($chan, $starts) {
+    go(function () use ($chan, $starts, $nbpush) {
         $cid = Swoole\Coroutine::getuid();
         $i = 0;
-        while (1) {
-            co::sleep(1);
+        while ($i<$nbpush) {
             echo "-----------\n" . (microtime(1) - $starts) . " pushes $i\n";
             $chan->push(['rand' => rand(1000, 9999), 'index' => $i]);
             echo "stats " . json_encode($chan->stats()) . "\n";

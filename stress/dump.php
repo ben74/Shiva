@@ -44,17 +44,17 @@ try {
         if (isset($argv[2])) $nb = $argv[2];
         if (isset($argv[3])) $total = $argv[3];
        if (isset($argv[4])) $host = $argv[4];
-
+//php $bf/Shiva/stress/dump.php reset
         if (in_array($nb, ['test', 'restart', 'dump', 'reset', 'xdebug'])) {//  php max4.php test shiva.devd339.dev.infomaniak.ch 80
             $cli=$x=null;//echo json_encode($argv);
             while(!$x){
 				if($cli){$cli->close();unset($cli);sleep(1);}
 				$_ENV['cli'] = $cli = new Client($host, $port);
 				$cli->set(['timeout' => $to, 'connect_timeout' => $to, 'write_timeout' => $to, 'read_timeout' => $to]);$cli->upgrade('/');
-				$res[] = $x=read('start', $e);
+				$res[] = $x= read('start', $e);
 			}
             if ($e) return;
-            $cli->push(json_encode([$nb => 1]));
+            $cli->push(json_encode(['supAdmin' => 'zyx', $nb => 1]));
             $res = read($nb, $e);
             echo"\n".$res;
             $cli->close();unset($cli);

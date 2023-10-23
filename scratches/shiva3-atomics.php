@@ -150,6 +150,13 @@ class wsServer
         if ($m > ($this->memlimit - (2 * pow(1024, 2))/* Seuil Allocation Memoire */)) {
             if (1 or !$this->r()->get('nbPending') or !$this->r()->get('nbConnectionsActives')) {//  Plus de consommateurs en attente ou plus aucun message en attente
                 echo"\nMemory Limit Exceeded .. auto restarting ..";
+                $this->r()->a['nbBgProcessing'] = __line__;
+                foreach ($this->r()->a as $k => &$v) {
+                    if (substr($k, 0, 8) === 'pending:' or substr($k, 0, 11) === 'suscribers:' or substr($k, 0, 8) === 'pid2sub:') {// Les fd et connections vont tous pêter ...
+                        $v = null;
+                    }
+                }
+                unset($v,$this->r()->a['free'],$this->r()->a['participants'],$this->r()->a['nbFree'],$this->r()->a['nbBgProcessing']);
                 $this->restart(true);
             }
         }
@@ -495,7 +502,8 @@ class wsServer
             if (isset($j['rpop'])) {return $this->send($sender,$this->r()->rpop($j['rpop']));}
             if (isset($j['get'])) {return $this->send($sender,$this->r()->get($j['get']));}
             if (isset($j['set']) and isset($j['v'])) {return $this->r()->set($j['set'],$j['v']);}
-            if (isset($j['incr'])) {return $this->r()->incr($j['incr']);}
+            if (isset($j['incr']) && isset($j['by']))  {return $this->r()->incr($j['incr'],$j['by']);}
+            elseif (isset($j['incr'])) {return $this->r()->decr($j['incr']);}
             if (isset($j['decr'])) {return $this->r()->decr($j['decr']);}
             if (isset($j['rpush'])and isset($j['v'])) {return $this->r()->rpush($j['rpush'],$j['v']);}
             if (isset($j['lpush'])and isset($j['v'])) {return $this->r()->lpush($j['lpush'],$j['v']);}
@@ -842,7 +850,7 @@ class wsServer
                 //$this->childProcess('workerstart');
                 //if ($this->pid) return;
                 $this->pid = \getmypid();
-                echo"\nworker Start :".$this->pid.':'.memory_get_usage().',' . $this->r()->a['nbPending'] . " pending messages," . $this->r()->a['nbConnectionsActives'] . ' clients connected';
+                echo"\nworker Start :".$this->pid.':'.memory_get_usage().',' . $this->r()->a['nbPending'] . ' pending messages,' . $this->r()->a['nbConnectionsActives'] . ' clients connected';
                 \Swoole\Timer::tick($this->timer, [$this, 'processNbPendingInBackground'], ['timer']);
                 return;
 

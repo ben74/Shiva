@@ -11,7 +11,7 @@ use Swoole\Coroutine\Channel;
  */
 function anomaly()
 {
-    $xdebugBreakPoint = 1;
+    $xdebugBreackPoint = 1;
 }
 /*
 $channels2start=['ya','yu','ye','yo'];
@@ -51,13 +51,21 @@ $nbChannels = 30;//$_ENV['nbChannels'] ?? 30;
 
 $binSize = strlen(bindec(max($nbChannels, $nbAtomics)));
 
-chdir(__dir__);
-require_once 'common.php';// never manager to run the tests.php with a "lightweight websocket client"
 $_ENV = ['gt' => 0];
+
 
 if ('break down every a=b commandline arguments into variables') {
     $a = [];
-    extract(argv());
+    $z = $argv;
+    array_shift($z);
+    foreach ($z as $t) {
+        if (strpos($t, '=')) {
+            [$k, $v] = explode('=', $t);
+            if ($v) {
+                ${$k} = $v;
+            }
+        }
+    }
     $pvc = rtrim($pvc . '/', '/').'/';
     ini_set('display_errors', 1);
 }
@@ -96,14 +104,15 @@ if (1) {
     echo "\nStarted:" . time() . '-' . json_encode($options);
 }
 
-
+chdir(__dir__);
+require_once 'common.php';// never manager to run the tests.php with a "lightweight websocket client"
 
 
 register_shutdown_function(function () {
     echo "\nDied:" . \getmypid();
 });
 
-// Is there a way to access a channel between server / worker processes ?
+
 class singleChannel extends singleThreaded {
 
     function llen($k)
@@ -510,7 +519,7 @@ $sw = new wsServer($port, $options, $needAuth, $tokenHashFun, $pass, $log, $time
 
 class wsServer
 {
-    public $memlimit, $log, $timer, $tokenHashFun, $server, $ato, $redis, $bgProcessing = false, $needAuth = false, $uuid = 0, $parentPid = 0, $pid = 0, $pendings = 0, $port = 0, $tick = 20000000, $options = [], $passworts = [], $frees = [], $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [];// 20 sec in microseconds here for heartbeat:: keep connection alive
+    public $memlimit, $log, $timer, $tokenHashFun, $server, $ato, $redis, $bgProcessing = false, $needAuth = false, $uuid = 0, $parentPid = 0, $pid = 0, $pendings = 0, $port = 0, $tick = 20000000, $options = [], $passworts = [], $frees = [], $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [],;// 20 sec in microseconds here for heartbeat:: keep connection alive
 
     public function shallRestart()
     {// return false;
@@ -634,11 +643,10 @@ class wsServer
     function shallSendMessageToClient($fd, $sub, $reason = '')
     {
         global $pvc, $nbPriorities;
-        
+        $m = false;
         $priorities = range($nbPriorities, 1);// from 3 to 1
         foreach ($priorities as $priority) {
-			$m = false;
-			
+
             $a = $this->ato()->firstOf('firstOf:' . $sub . ':' . $priority);
             $b = $this->ato()->firstOf('firstOfDisk:' . $sub . ':' . $priority);
 
@@ -652,14 +660,14 @@ class wsServer
                         $time = $this->ato()->lpop('firstOfDisk:' . $sub . ':' . $priority);
                         $m = file_get_contents($x);
                         if(!$m){
-                            $this->r()->incr('nb:diskempy:' . $sub);
+                            echo"\nNothing to read from:".$x;
                         }
                         $this->r()->decr('nbMessages2disk');
                         unlink($x);
                         $this->db($x, 1);
                     }
                 }
-            } elseif (!$m && ($a && 'read from ram')) {
+            } elseif (!$m or ($a && 'read from ram')) {
                 $time = $this->ato()->lpop('firstOf:' . $sub . ':' . $priority);
                 if ($this->r()->exists('pending:' . $sub . ':' . $priority) and ($this->r()->llen('pending:' . $sub . ':' . $priority))){
                     $m = $this->r()->lpop('pending:' . $sub . ':' . $priority);
@@ -680,17 +688,15 @@ $a=1;
     {
         $this->busy($this->pid . ',' . $fd, $fd);
         $this->r()->HINCRBY('pendings', $sub, -1);
-        if ( ! $this->sendOrDisconnect($fd, ['queue' => $sub, 'message' => $m], 1, $reason)) {
+        if (!$this->sendOrDisconnect($fd, ['queue' => $sub, 'message' => $m], 1, 'async')) {
             $this->r()->lPush('pending:' . $sub, $m);// requeue, but wrapper ceci avec un last time ... éhéh
             $this->ato()->lpush('firstOf:' . $sub, $time);
         } else {
-            if(0){
-				$this->r()->HINCRBY($reason, $fd, 1);
-				$nbSent = $this->r()->hget($reason, $fd);
-				if ($nbSent > 1) {
-					$this->db(implode(' ;; ', $this->frees) . ' >> ' . $fd);
-				}
-			}
+            $this->r()->HINCRBY($reason, $fd, 1);
+            $nbSent = $this->r()->hget($reason, $fd);
+            if ($nbSent > 1) {
+                $this->db(implode(' ;; ', $this->frees) . ' >> ' . $fd);
+            }
             $this->r()->incr('nbSent:' . $reason);
             $this->db('free: ' . $fd . " $sub receives :" . $m, 1);
         }
@@ -840,8 +846,7 @@ $a=1;
 
     function rep($sender, $frame)
     {
-        $this->sendOrDisconnect($sender, 1, 1, 'rep');
-        //$this->sendOrDisconnect($sender, $frame->data . ':' . hash('crc32c', $frame->data), 1, 'rep');
+        $this->sendOrDisconnect($sender, $frame->data . ':' . hash('crc32c', $frame->data), 1, 'rep');
     }
 
     function handshake($server, $frame)
@@ -1004,10 +1009,6 @@ $a=1;
                     $x = $this->r()->dump();
                     foreach ($x as $k => &$v) {
                         if (substr($k, 0, 4) == 'pid2') $v = null;
-                        elseif(strpos($k,'firstOf')!==FALSE) $v = null;
-                        elseif(strpos($k,'pending')!==FALSE) $v = null;
-                        elseif(substr($k, 0, 11) == 'suscribers:') $v = null;
-                        elseif(in_array($k,['free','p2d','pendings'])) $v = null;
                     }
                     unset($v);
                     $x = array_filter($x);
@@ -1334,12 +1335,11 @@ if('croiser les libres et ceux qui sont abonnés'){
             echo "\nServer:" . getMyPid();
             ///*
             $server->on('workerstart', function (Server $server) use ($port) {
-                $_SERVER['_'] = 'worker';
                 $this->pid = \getmypid();
                 echo "\nworker Start: " . $this->pid;
                 global $channels2start,$nbPriorities,$capacityMessagesPerChannel;
                 $a=1;
-if(0 and !isset($_ENV['channels'])){// Why : Seems to crash
+if(0 and !isset($_ENV['channels'])){
     foreach($channels2start as $i) {
         $j = 1;
         while ($j <= $nbPriorities) {
@@ -1352,6 +1352,7 @@ if(0 and !isset($_ENV['channels'])){// Why : Seems to crash
 }
                 $a=1;
 }
+                $_SERVER['_'] = 'worker';
                 $f = 'backup.json';
                 if (is_file($f)) {
                     echo "\nRestoringBackup.." . filesize($f);

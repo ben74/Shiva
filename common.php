@@ -381,5 +381,19 @@ function websocket_read($sp, &$error_string = NULL)
     return $data;
 }
 
+function argv(){
+    global $argv;
+    $z = $argv;$args=[];
+    array_shift($z);
+    foreach ($z as $t) {
+        if(strpos($t,'=')){
+            [$k, $v] = explode('=', $t);
+            if ($v) {
+                $args[$k] = $v;
+            }
+        }
+    }
+    return $args;
+}
 
 return; ?>

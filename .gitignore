@@ -1,4 +1,5 @@
 @notes/*
 vendor/*
+messages/*
 *.log
-$.rdb
+*.rdb
