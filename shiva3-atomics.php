@@ -40,7 +40,7 @@ $hbCheckEach=60;// leads to some workers timeouts errors
 
 $pvc = $salt = '';
 $socketSizeKo = 1;
-$p = 2000;
+$port = 2000;
 $dmi = 'YmdHi';
 $timerMs = 1000;
 $redisPort = 6379;
@@ -103,6 +103,7 @@ if (1) {
     if ($nbWorkers < $rea) $nbWorkers = $rea;
     echo "\nMaster:" . \getmypid() . ":Rea:$rea,wor:$nbWorkers";
     $options = [//  https://www.swoole.co.uk/docs/modules/swoole-server/configuration
+        'open_cpu_affinity' => true, 'max_request' => 0,// before restarting workers, or backup data in between ( it also drops the connections ... )
         'heartbeat_idle_time' => $hbIdle,/*10 min*/
         'heartbeat_check_interval' => $hbCheckEach,// leads to some workers timeouts errors
         //$socket>setOption(SOL_SOCKET, SO_REUSEPORT, true)
@@ -112,7 +113,7 @@ if (1) {
         // swoole WARNING	Server::accept_connection(): accept() failed, Error: Too many open files[24]
         //'daemonize' => 1,
         'log_file' => '/dev/null', 'log_level' => 5,//SWOOLE_LOG_INFO,
-        'max_request' => 0,
+
         'dispatch_mode' => 2,// Fixed fd per process : 7 : use idle, 1 : async and non blocking
         'discard_timeout_request' => false,
         'tcp_fastopen' => true,
@@ -137,11 +138,22 @@ register_shutdown_function(function () {
 });
 
 //compact('taskWorkers,nbChannels,nbAtomics,capacityMessagesPerChannel,maxSuscribersPerChannel')+['p'=>$p]
-$sw = new wsServer($p, $options, $needAuth, $tokenHashFun, $pass, $log, $timerMs);
+$sw = new wsServer($port, $options, $needAuth, $tokenHashFun, $pass, $log, $timerMs);
 
 class wsServer
 {
-    public $log, $timer, $bgProcessing = false, $tokenHashFun, $needAuth = false, $uuid = 0, $parentPid = 0, $server, $redis, $pid = 0, $pendings = 0, $passworts = [], $frees = [], $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [], $tick = 20000000;// 20 sec in microseconds here for heartbeat:: keep connection alive
+    public $memlimit, $log, $timer, $tokenHashFun, $server, $redis, $uuid = 0, $parentPid = 0, $pid = 0, $pendings = 0, $port = 0, $bgProcessing = false, $needAuth = false, $options = [], $passworts = [], $frees = [], $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [], $tick = 20000000;// 20 sec in microseconds here for heartbeat:: keep connection alive
+
+    public function shallRestart()
+    {// return false;
+        $m = memory_get_usage();
+        if ($m > ($this->memlimit - (2 * pow(1024, 2))/* Seuil Allocation Memoire */)) {
+            if (1 or !$this->r()->get('nbPending') or !$this->r()->get('nbConnectionsActives')) {//  Plus de consommateurs en attente ou plus aucun message en attente
+                echo"\nMemory Limit Exceeded .. auto restarting ..";
+                $this->restart(true);
+            }
+        }
+    }
 
     function db($x, $level = 9, $minLogLevel = 1)
     {
@@ -155,20 +167,28 @@ class wsServer
 
     function restart($dump = false)
     {// Todo : doesn't work as expected, the connections remains in timeout
-        $this->bgProcessing=time();
-        if($dump){
-            $x=$this->r()->dump();//dont care ... no care, just need to export the pending Messages ....
+        $this->bgProcessing = time();
+        if ($dump) {
+            $x = $this->r()->dump();//dont care ... no care, just need to export the pending Messages ....
             unset($x['participants'],$x['p2h'],$x['sentAsapToFd'],$x['messagesSentToFdOnBackground']);
             foreach($x as $k=>&$v){if(substr($k,0,4)=='pid2')$v=null;}unset($v); $x=array_filter($x);
             // just need pending ones btw
-            file_put_contents('backup.json',json_encode($x));
+            echo"\nServer Restarting :".$this->pid.':'.memory_get_usage().',' . $this->r()->get('nbPending') . " pending messages," . $this->r()->get('nbConnectionsActives') . ' clients connected';
+            //$x['nbConnectionsActives'] = 0;// Clients are killed :)
+            file_put_contents('backup.json', json_encode($x));// nécessaire car le nouveau worker débute avant le stop du précédent
         }
-        $this->passworts = $this->frees = $this->conn =$this->clients = $this->fdIs = $this->h2iam =$this->pool = $this->fd2sub = $this->auths = $this->ticks = [];
-        $this->server->stop(-1);$this->server->start();
+
+        $this->timer = null;
+        $this->frees = $this->conn = $this->clients = $this->fdIs = $this->h2iam = $this->pool = $this->fd2sub = $this->auths = $this->ticks = [];
+
+        $this->server->reload();// kill -USR1 MASTER_PID
+        // $this->server->stop();$this->server=null;$this->run($this->port, $this->options);//unset($this->server);
+        //$this->server->stop(-1);$this->server->start();
         //    pr kill -USR1 MASTER_PID
         //$this->server->reload(true);//User defined signal 2
         $this->bgProcessing=false;
         gc_collect_cycles();// where sould be that memLeak be located at???
+        gc_mem_caches();/* todo :: pas terrible  : parfois il clean sa mémoire lui même sans ordre de restart .... */
         echo"\nrestarted:".memory_get_usage();// _ENV['_a']
         return;
     }
@@ -194,6 +214,9 @@ class wsServer
         }
 
         $this->bgProcessing = false;
+
+        $this->shallRestart();
+
 
         $free = $this->r()->get('free');//frees;
         if (!$free) {
@@ -237,6 +260,9 @@ class wsServer
                         }
                         $this->r()->incr('nbBgSent');
                         $this->r()->decr('nbPending');
+
+
+
                         $this->db('free: ' . $fd . " $sub receives :" . $m, 1);
                         break;// Cuz not free anymore
                     }else{
@@ -249,21 +275,34 @@ class wsServer
         return;
     }
 
-    public function __construct($p, $options, $needAuth = false, $tokenHashFun = null, $passwords = [], $log = false, $timer = 2000)
+    public function __construct($port, $options, $needAuth = false, $tokenHashFun = null, $passwords = [], $log = false, $timer = 2000)
     {
         global $tick;
         $this->tick = $tick;
         //$_ENV['gt']['started'] = microtime(1);
         $this->log = $log;
+        $this->port = $port;
         $this->timer = $timer;
+        $this->options = $options;
         $this->needAuth = $needAuth;
         $this->passworts = $passwords;
+        $memlimit = ini_get('memory_limit');
+        if (preg_match('/^(\d+)(.)$/', $memlimit, $matches)) {
+            if ($matches[2] == 'G') {
+                $memlimit = $matches[1] * 1024 * 1024 * 1024; // nnnM -> nnn MB
+            } elseif ($matches[2] == 'M') {
+                $memlimit = $matches[1] * 1024 * 1024; // nnnM -> nnn MB
+            } else if ($matches[2] == 'K') {
+                $memlimit = $matches[1] * 1024; // nnnK -> nnn KB
+            }
+        }
+        $this->memlimit = $memlimit;
         $this->tokenHashFun = $tokenHashFun;
         $this->parentPid = \getmypid();
-        if (is_array($p)) {
-            foreach ($p as $k => $v) $this->{$k} = $v;
+        if (is_array($port)) {
+            foreach ($port as $k => $v) $this->{$k} = $v;
         }
-        $this->run($p, $options);
+        $this->run($port, $options);
     }
 
     function getLock($x)
@@ -467,21 +506,28 @@ class wsServer
                     $this->send($sender,['Amem'=>memory_get_usage()],'',false);
                 }
                 if (isset($j['reset'])) {
+                    $a=memory_get_usage();
                     $this->r()->reset();
+                    $this->r()->a['beforemem'] = $a;
                     file_put_contents('backup.json',json_encode([]));
                     $this->restart(false);
-                    gc_collect_cycles();/* todo :: pas terrible */ $j['dump']=1;
+                    $j['dump']=1;
                 }
+
                 if (isset($j['restart'])) { $this->restart(true);$this->send($sender,['restarted'=>1,'Amem'=>memory_get_usage()],'',false);}
 
                 if (isset($j['dump'])) {
                     $x = $this->r()->dump();
                     foreach($x as $k=>&$v){if(substr($k,0,4)=='pid2')$v=null;}unset($v); $x=array_filter($x);
-                    $x['Amem']=memory_get_usage();if(!$x['free'])$x['free']=[];
-                    $x['nbFree']=count($x['free']);
-                    $x['time']=$_ENV['gt'];
-                    $x['Atime']=$x['lastSent']-$x['firstMessage'];
-                    unset($x['participants'],$x['p2h'],$x['sentAsapToFd'],$x['messagesSentToFdOnBackground']);//dont care ... no care,
+                    $x['Amem']=memory_get_usage();
+                    if (isset($x['beforemem'])) {
+                        $x['freed'] = $x['beforemem'] - $x['Amem'];
+                    }
+                    if (!$x['free']) $x['free'] = [];
+                    $x['nbFree'] = count($x['free']);
+                    $x['time'] = $_ENV['gt'];
+                    $x['Atime'] = $x['lastSent'] - $x['firstMessage'];
+                    unset($x['participants'], $x['p2h'], $x['sentAsapToFd'], $x['messagesSentToFdOnBackground']);//dont care ... no care,
                     $this->send($sender, $x, 'dump', false);
                     return;
                 }
@@ -772,32 +818,31 @@ class wsServer
         $mem->set($k, [$col => json_encode($x)]);
     }
 
-    function run($p, $options)
+    function run($port, $options)
     {
         try {
             // see https://openswoole.com/docs/modules/swoole-server-doc
             //$m=SWOOLE_PROCESS;if($options['worker_num']==1)$m=SWOOLE_BASE;
-            $this->server = $server = new Server('0.0.0.0', $p);
-            //  $this->server = $server = new swoole_websocket_server('0.0.0.0', $p);
-            //$this->server = $server = new Server('0.0.0.0', $p, SWOOLE_PROCESS, SWOOLE_SOCK_TCP | SWOOLE_SSL);
+            $this->server = $server = new Server('0.0.0.0', $port);
+            //  $this->server = $server = new swoole_websocket_server('0.0.0.0', $port);
+            //$this->server = $server = new Server('0.0.0.0', $port, SWOOLE_PROCESS, SWOOLE_SOCK_TCP | SWOOLE_SSL);
             //$server->set(array('ssl_cert_file' => __DIR__.'/ssl.cert','ssl_key_file' => __DIR__.'/ssl.key',));
 
 
             $server->set($options);
             echo"\nServer:".getMyPid();
             ///*
-            $server->on('workerstart', function (Server $server) use ($p) {
-                $f='backup.json';
-                if(is_file($f)){
-                    echo"\nRestoringBackup..";
-                    $x=json_decode(file_get_contents($f),true);
-                    $this->r()->a=$x;
+            $server->on('workerstart', function (Server $server) use ($port) {
+                $f = 'backup.json';
+                if (is_file($f)) {
+                    echo "\nRestoringBackup.." . filesize($f);
+                    $this->r()->a = json_decode(file_get_contents($f), true);
                 }
 
                 //$this->childProcess('workerstart');
                 //if ($this->pid) return;
                 $this->pid = \getmypid();
-                echo"\nwstart".$this->pid;
+                echo"\nworker Start :".$this->pid.':'.memory_get_usage().',' . $this->r()->a['nbPending'] . " pending messages," . $this->r()->a['nbConnectionsActives'] . ' clients connected';
                 \Swoole\Timer::tick($this->timer, [$this, 'processNbPendingInBackground'], ['timer']);
                 return;
 
@@ -835,8 +880,8 @@ class wsServer
                     $this->db('killed');
                 });
             });
-            $server->on('workerstop', function (Server $server) use ($p) {
-                echo"\nwstop".getmypid();
+
+            $server->on('workerstop', function (Server $server) use ($port) {
                 $this->db('workerstop', 99);// Cleans the pool, participants who shall reconnect to another instance
 
                 foreach ($this->pool as $fd) {// Pour le pool des connections actives
@@ -859,50 +904,57 @@ class wsServer
                 foreach ($this->fdIs as $hm => $iam) {
                     $this->r()->Hdel('iam', $iam);
                 }
+
+                //$f='backup.json';file_put_contents($f,json_encode($this->r()->a));
             });
-            $server->on('workererror', function (Server $server, int $workerId, int $workerPid, int $exitCode, int $signal) use ($p) {
+
+            $server->on('workererror', function (Server $server, int $workerId, int $workerPid, int $exitCode, int $signal) use ($port) {
                 echo"\nworkerError".$exitCode.':'.getMyPid();
-                $this->db(['workererror', $p], 99);
+                $this->db(['workererror', $port], 99);
             });
-            $server->on('managerstart', function (Server $server) use ($p) {
+
+            $server->on('managerstart', function (Server $server) use ($port) {
                 echo"\nmStart".getmypid();
                 $this->db('managerstart');
             });
-            $server->on('managerstop', function (Server $server) use ($p) {
+
+            $server->on('managerstop', function (Server $server) use ($port) {
                 echo"\nmStop".getmypid();
                 $this->db('managerstop');
             });
 
             if (1) {
-                $server->on('timer', function (Server $server) use ($p) {
+                $server->on('timer', function (Server $server) use ($port) {
                     $this->db('timer');
                 });
-                $server->on('connect', function (Server $server,$fd) use ($p) {
+                $server->on('connect', function (Server $server,$fd) use ($port) {
                     //echo"\nConnect:".$fd.':'.time();
                     $this->db('connect');
                 });
-                $server->on('shutdown', function (Server $server,$fd) use ($p) {  echo"\nShutdown:".time();  });
-                $server->on('receive', function (Server $server) use ($p) {
+                $server->on('shutdown', function (Server $server,$fd) use ($port) {  echo"\nShutdown:".time();  });
+                $server->on('receive', function (Server $server) use ($port) {
                     $this->db('receive');
                 });
-                $server->on('packet', function (Server $server) use ($p) {
+                $server->on('packet', function (Server $server) use ($port) {
                     $this->db('packet');
                 });
-                $server->on('task', function (Server $server) use ($p) {
+                $server->on('task', function (Server $server) use ($port) {
                     $this->db('task');
                 });
-                $server->on('finish', function (Server $server) use ($p) {
+                $server->on('finish', function (Server $server) use ($port) {
                     echo"\nfinish".getmypid();
                     $this->db('finish');
                 });
-                $server->on('pipemessage', function (Server $server) use ($p) {
+                $server->on('pipemessage', function (Server $server) use ($port) {
                     $this->db('pipemessage');
                 });
 
-                $server->on('beforereload', function (Server $server) use ($p) {
+                $server->on('beforereload', function (Server $server) use ($port) {
+                    //echo"\nBeforeReload:".memory_get_usage();
                     $this->db('beforereload');
                 });
-                $server->on('afterreload', function (Server $server) use ($p) {
+                $server->on('afterreload', function (Server $server) use ($port) {
+                    //echo"\nAfterreload:".memory_get_usage();
                     $this->db('afterreload');
                 });
 
@@ -938,7 +990,7 @@ class wsServer
             });
 
 
-            $server->on('start', function (Server $server) use ($p) { // Le serveur uniquement, pas les workers
+            $server->on('start', function (Server $server) use ($port) { // Le serveur uniquement, pas les workers
                 echo"\nss:".getmypid();
 
                 global $swooleTableStringMaxSize, $nbReferences, $nbChannels, $nbAtomics, $nbWorkers, $capacityMessagesPerChannel, $binSize, $nbWorkers, $listTableNb, $listTableNbMaxSize;
