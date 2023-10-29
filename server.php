@@ -631,11 +631,11 @@ class wsServer
     }
 
     /** todo : implement at other places, especially for requeiing */
-    function shallSendMessageToClient($fd, $sub, $reason = '')
+    function shallSendMessageToClient($fd, $sub, $reason = '', $priorities = null)
     {
         global $pvc, $nbPriorities;
         
-        $priorities = range($nbPriorities, 1);// from 3 to 1
+        if(!$priorities)$priorities = range($nbPriorities, 1);// from 3 to 1
         foreach ($priorities as $priority) {
 			$m = false;
 			
@@ -664,14 +664,14 @@ class wsServer
                 if ($this->r()->exists('pending:' . $sub . ':' . $priority) and ($this->r()->llen('pending:' . $sub . ':' . $priority))){
                     $m = $this->r()->lpop('pending:' . $sub . ':' . $priority);
                 }
-            } elseif ('nothing to read then ..') {
+            } elseif ('nothing to read then .. passer à la suite ..') {
 $a=1;
             }
 
             if ($m) {
                 return $this->sendOrRequeue($fd, $sub, $m, $reason, $time);
             } elseif ('cela se peut être consomée entre temps ... passer à une autre') {
-                $this->r()->incr('nb:queuevide:' . $sub);
+                $this->r()->incr('nb:queuevide:' . $sub.' '.$reason);
             }
         }
     }
@@ -1257,16 +1257,21 @@ if('croiser les libres et ceux qui sont abonnés'){
 
     function shallSend2Free($himself, $sender)
     {
-        global $pvc;
+        global $pvc,$nbPriorities;	 $priorities = range($nbPriorities, 1);// from 3 to 1
+
         $this->db('Pid2Sub4:' . $himself . '==>' . $this->r()->exists('pid2sub:' . $himself), 0);
         if ($this->r()->exists('pid2sub:' . $himself)) {
             $suscribedTo = $this->r()->lrange('pid2sub:' . $himself, 0, -1);
             if ($suscribedTo) {
                 $this->db('free: ' . $himself . ' is suscribedTo:' . implode(',', $suscribedTo), 0);
-                foreach ($suscribedTo as $topic) {
-                    if ($this->shallSendMessageToClient($sender, $topic, 'free')) {
-                        return true;// stop cycling subject, the client is busy consuming ressource
-                    }
+                foreach ($suscribedTo as $topic) {					
+					foreach ($priorities as $priority) {
+						if($this->r()->exists('pending:' . $topic . ':' . $priority) and $this->r()->llen('pending:' . $topic . ':' . $priority)){
+							if ($this->shallSendMessageToClient($sender, $topic, 'free',[$priority])) {
+								return true;// stop cycling subject, the client is busy consuming ressource
+							}
+						}
+					}
                 }
             }
         }

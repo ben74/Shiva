@@ -84,21 +84,32 @@ try{
             'push' => ['push' => $pushes, 'message' => '-' . $pushes . ',order:3,noprio:1,MessagContains:' . $pid . '-' . uniqid()],
 
             'prio:3' => ['priority'=>3, 'push' => $pushes, 'message' => '-' . $pushes . ',order:1,prio3:MessagContains:' . $pid . '-' . uniqid()],
+            
+            ['incr'=>'nbPushed1','by'=>3],
 
             //'consume' => ['data' => ['consume'=>$consumes], 'cb' => $cb],
             'suscribe,free,consume' => [
                 'transaction'=>[
-                    //
-                    //consume=suscribe+free
                     'suscribe' => ['suscribe' => $consumes],'free' => ['free' => 1],// upon deconnection, shall re-suscribe at least ....
                     'wait' => ['data' => ['keepalive' => 1], 'cb' => $cb],//gets prio 3
-                    // Le problème:ce sont d'autres process qui peuvent choper cet ordre .. mais osef au final ..
-                        ['free' => 1],
-                            ['data' => ['keepalive' => 1], 'cb' => $cb],// gets disk : older than prio 1
-                        ['free' => 1],
-                            ['data' => ['keepalive' => 1], 'cb' => $cb],// gets prio 1
                     ]
-                ]
+                ],
+// gets disk : older than prio 1                
+			['transaction'=>[
+					['suscribe' => $consumes],
+					['free' => 1],
+					['data' => ['keepalive' => 1], 'cb' => $cb],
+				]
+			],
+// gets prio 1, what about : operation timed out -> veut relancer toute la transaction depuis le départ
+			['transaction'=>[
+					['suscribe' => $consumes],
+					['free' => 1],
+					['data' => ['keepalive' => 1], 'cb' => $cb],
+				]
+			],
+			['incr'=>'nbConsumed1','by'=>3],
+				
             // read : {"err":"json not valid"}
             // read'=> function($a){$a="\n\tread:".$a;echo $a;return $a;}// and waits (sleep30) till got something
         ];
@@ -129,11 +140,16 @@ function e($x){
     $a=$x;echo','.$x;
 }
 
-function process($dialog, $depth = 0){
+function process($dialog, $depth = 0, $maxTries = 3){
     global $log;
     foreach ($dialog as $k => $v) {
-        $recv = $ok = false;
+        $tries=0;$recv = $ok = false;
         while (!$ok) {
+			if($tries>$maxTries){		
+				$log[]="stop: $maxTries essais pour $k";
+				echo"\n".json_encode($log);
+				return false;
+			}
             try {
                 if (is_callable($v)/*gettype($v) === 'object'*/) {//function'
                     $ok = $read = read2($k);
@@ -161,10 +177,12 @@ function process($dialog, $depth = 0){
                     $a = 1;
                 }
             } catch (\Exception $e) {
-                echo",".$e->getMessage();
+				$log[]=$e->getMessage();
+				echo"\n".json_encode($log);
                 $ok = false;
             }
             if (!$ok) {
+				$tries++;
                 sleep(1);
             }
         }
@@ -208,15 +226,18 @@ function read2($reason = '', $nbRetries = 0, $essai = 0, $connectOnly =false)
             }
         }
         $x = $cli->recv();// false : not connected,bloquing :: waits for next transmission
-        if ($cli->errCode) {//      websocket handshake failed, cannot push data
-            if (0 and $cli->errCode == 8504) {
+        if ($cli->errCode) {
+            if (0 and $cli->errCode == 60) {// Operation timed out :)
+				$a=1;
+			}
+            if (0 and $cli->errCode == 8504) {//      8504:websocket handshake failed, cannot push data, Operation timed out
                 $log[] = $cli->errCode;
                 return null;
             }
-            throw new Exception('e'.$cli->errCode);
+            throw new Exception('e'.$cli->errCode.':'.$cli->errMsg);//errCode
         }
     } catch (\Throwable $e) {
-        if($cli){
+        if($cli && $cli->errCode!=60){//  dont kill cli upon 60 error, retry only :)
             $cli->close();
             $cli = null;
         }
@@ -256,52 +277,6 @@ function fpc($f, $d, $fla = null)
 {
     echo "\n" . trim($d);
 }
-
-function read($reason = '', &$error = 0, $nbRetries = 0, $essai = 0)
-{
-    global $tentative, $log, $pid, $cli, $exit, $expectedRepliesNb, $nbReplies, $waits, $b;
-    if ($essai > $nbRetries) {
-        echo "\n#$pid:essai:$essai;".implode(',',$log);
-        $cli->close();unset($cli);die;
-    }
-    $x = $cli->recv();
-    $nbReplies++;
-    $a = ceil(microtime(true) - $b);
-    if (($nbReplies + $waits ) > $expectedRepliesNb) {
-        echo "\n$pid:$nbReplies > $expectedRepliesNb,$tentative:$reason:err:". $a." :: ".trim($x->data);
-    }// $x->data == 'opened'
-    if ($cli->errCode) {//      websocket handshake failed, cannot push data
-        throw new Exception($cli->errCode);
-        $error = $cli->errCode;// err=60
-        if (strpos($reason, 'opened:') === 0) {
-            $log[] = 'cnt:' . $a;
-        } else {
-            $log[] = $reason.','.$error.','. $cli->errMsg.','.$a;
-        }
-
-        if ($nbRetries) {
-            sleep(1);
-            $b=microtime(true);
-            return read($reason, $error, $nbRetries, $essai + 1);
-        }
-
-        if ($error == 8504) {
-            $cli->close();$cli=null;
-            $log[]=$error;return null;
-        }
-
-        $cli->close();
-        $exit = 69;
-        return null;
-        if ($cli->errCode == 60 or $cli->errMsg == 'Operation timed out') {//Operation timed out
-            $cli->close();
-            $error = 60;//throw new \Exception(60);
-        }
-        return null;
-    }
-    return trim($x->data);
-}
-
 
 //
 return; ?>
