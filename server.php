@@ -48,8 +48,8 @@ $supAdmin='zyx';
 $taskWorkers = 1;//$_ENV['taskWorkers'] ?? 2;
 $nbAtomics = 0;// non nécessaires ici //$_ENV['nbAtomics'] ?? 100;
 $nbChannels = 30;//$_ENV['nbChannels'] ?? 30;
-
-$binSize = strlen(bindec(max($nbChannels, $nbAtomics)));
+//Deprecated: Invalid characters passed for attempted conversion, these have been ignored in /Users/benjaminfontaine/dev/Shiva/server.php on line 52
+$binSize = strlen(decbin(max($nbChannels, $nbAtomics)));
 
 chdir(__dir__);
 require_once 'common.php';// never manager to run the tests.php with a "lightweight websocket client"
@@ -218,9 +218,13 @@ class singleThreaded
         return array_pop($this->a[$k]);
     }
 
+    function rpushUnique($k, $v){
+        if (isset($this->a[$k]) && in_array($v, $this->a[$k])) return;
+        return $this->rpush($k,$v);
+    }
+
     function rpush($k, $v)
     {
-        //echo"\nPush:$k:$v";
         if (!is_array($this->a[$k])) $this->a[$k] = [];
         return array_push($this->a[$k], $v);
     }
@@ -518,7 +522,7 @@ class wsServer
         if ($m > ($this->memlimit - (2 * pow(1024, 2))/* Seuil Allocation Memoire */)) {
             if (1 or !$this->r()->get('nbPending') or !$this->r()->get('nbConnectionsActives')) {//  Plus de consommateurs en attente ou plus aucun message en attente
                 echo "\nMemory Limit Exceeded .. auto restarting ..";
-                $this->r()->a['nbBgProcessing'] = __line__;
+                $this->bgProcessing = __line__;
                 foreach ($this->r()->a as $k => &$v) {
                     if (substr($k, 0, 8) === 'pending:' or substr($k, 0, 11) === 'suscribers:' or substr($k, 0, 8) === 'pid2sub:') {// Les fd et connections vont tous pêter ...
                         $v = null;
@@ -581,7 +585,10 @@ class wsServer
             return;
         }
 
-        $this->bgProcessing = $now = time();
+        $this->bgProcessing = __line__;
+        $this->r()->incr('nbBgProcessing');
+        $now = time();
+
         if ($_ENV['timeToBackup'] and $this->r()->get('lastBackup') < ($now - $_ENV['timeToBackup'])) {
             $this->r()->set('lastBackup', $now);
             $x = $this->r()->dump();
@@ -591,6 +598,7 @@ class wsServer
             unset($v);
             $x = array_filter($x);
             $x['Amem'] = memory_get_usage();
+            $x['APeak'] = memory_get_peak_usage();
             if (!$x['free']) $x['free'] = [];
             $x['nbFree'] = count($x['free']);
             $x['time'] = $_ENV['gt'];
@@ -598,21 +606,21 @@ class wsServer
             file_put_contents('backup.json', json_encode($x));
         }
 
-        $this->bgProcessing = false;
+        //$this->bgProcessing = false;
 
         $this->shallRestart();
 
 
         $free = $this->r()->get('free');//frees;
         if (!$free) {
-            return;
+            $this->bgProcessing = false;return;
         }
         if (!$this->r()->get('nbPending')) {
-            return;
+            $this->bgProcessing = false;return;
         }
 
-        $this->bgProcessing = $now;
-        $this->r()->incr('nbBgProcessing');
+        //$this->bgProcessing = __line__;
+
 
         //  $this->db('pg', 1);
         //  echo "\nBgProcessFree:".count($free).'/pen'.$this->r()->get('nbPending');
@@ -634,11 +642,11 @@ class wsServer
     function shallSendMessageToClient($fd, $sub, $reason = '', $priorities = null)
     {
         global $pvc, $nbPriorities;
-        
+
         if(!$priorities)$priorities = range($nbPriorities, 1);// from 3 to 1
         foreach ($priorities as $priority) {
 			$m = false;
-			
+
             $a = $this->ato()->firstOf('firstOf:' . $sub . ':' . $priority);
             $b = $this->ato()->firstOf('firstOfDisk:' . $sub . ':' . $priority);
 
@@ -679,7 +687,7 @@ $a=1;
     function sendOrRequeue($fd, $sub, $m, $reason, $time)
     {
         $this->busy($this->pid . ',' . $fd, $fd);
-        $this->r()->HINCRBY('pendings', $sub, -1);
+
         if ( ! $this->sendOrDisconnect($fd, ['queue' => $sub, 'message' => $m], 1, $reason)) {
             $this->r()->lPush('pending:' . $sub, $m);// requeue, but wrapper ceci avec un last time ... éhéh
             $this->ato()->lpush('firstOf:' . $sub, $time);
@@ -691,10 +699,11 @@ $a=1;
 					$this->db(implode(' ;; ', $this->frees) . ' >> ' . $fd);
 				}
 			}
+            $this->r()->HINCRBY('pendings', $sub, -1);
             $this->r()->incr('nbSent:' . $reason);
+            $this->r()->decr('nbPending');
             $this->db('free: ' . $fd . " $sub receives :" . $m, 1);
         }
-        $this->r()->decr('nbPending');
         return true;
     }
 
@@ -838,9 +847,9 @@ $a=1;
         return true;
     }
 
-    function rep($sender, $frame)
+    function rep($sender, $msg = 1, $tries = 1)
     {
-        $this->sendOrDisconnect($sender, 1, 1, 'rep');
+        $this->sendOrDisconnect($sender, $msg, $tries, 'rep');
         //$this->sendOrDisconnect($sender, $frame->data . ':' . hash('crc32c', $frame->data), 1, 'rep');
     }
 
@@ -970,7 +979,7 @@ $a=1;
             }
 
             if (isset($j['decr']) && isset($j['by'])) {
-                return $this->r()->incr($j['incr'], $j['by']);
+                return $this->r()->decr($j['decr'], $j['by']);
             } elseif (isset($j['decr'])) {
                 return $this->r()->decr($j['decr'], $j['by']);
             }
@@ -978,14 +987,21 @@ $a=1;
             if (isset($j['incr']) && isset($j['by'])) {
                 return $this->r()->incr($j['incr'], $j['by']);
             } elseif (isset($j['incr'])) {
-                return $this->r()->decr($j['incr']);
+                return $this->r()->incr($j['incr']);
+                //return $this->sendOrDisconnect($sender, ['auth' => false]);
             }
 
-            if (isset($j['supAdmin']) && $j['supAdmin'] == $supAdmin) {
+            if (isset($j['supAdmin'])) {
+
+                if ($j['supAdmin'] !== $supAdmin) {
+                    return $this->sendOrDisconnect($sender, ['auth' => false]);
+                }
+
                 if (isset($j['xdebug'])) {
                     anomaly();
-                    $this->sendOrDisconnect($sender, ['Amem' => memory_get_usage()], '', false);
+                    return $this->sendOrDisconnect($sender, ['Amem' => memory_get_usage()], '', false);
                 }
+
                 if (isset($j['reset'])) {
                     $a = memory_get_usage();
                     $this->r()->reset();
@@ -997,37 +1013,54 @@ $a=1;
 
                 if (isset($j['restart'])) {
                     $this->restart(true);
-                    $this->sendOrDisconnect($sender, ['restarted' => 1, 'Amem' => memory_get_usage()], '', false);
+                    return $this->sendOrDisconnect($sender, ['restarted' => 1, 'Amem' => memory_get_usage()], '', false);
                 }
 
                 if (isset($j['dump'])) {
                     $x = $this->r()->dump();
+                    $y = [];
                     foreach ($x as $k => &$v) {
                         if (substr($k, 0, 4) == 'pid2') $v = null;
-                        elseif(strpos($k,'firstOf')!==FALSE) $v = null;
-                        elseif(strpos($k,'pending')!==FALSE) $v = null;
-                        elseif(substr($k, 0, 11) == 'suscribers:') $v = null;
-                        elseif(in_array($k,['free','p2d','pendings'])) $v = null;
+                        elseif (strpos($k, 'firstOf') !== FALSE) $v = null;
+                        elseif (strpos($k, 'pending:') !== FALSE) {// todo : compter
+                            if (is_array($v)) $y[$k] = count($v);
+                            $v = null;
+                        } elseif (substr($k, 0, 11) == 'suscribers:') {// todo : compter
+                            if (is_array($v)) $y['sus'][$k] = count($v);
+                            $v = null;
+                        } elseif (0 and in_array($k, ['p2d'])) {
+                            if (is_array($v)) {
+                                foreach ($v as $k2 => $v2) {
+                                    $y[$k][$k2]=count($v2);
+                                }
+                            }
+                            $v=null;
+                        } elseif (in_array($k, ['free', 'participants'])) {//'pendings',
+                            if(is_array($v))$y[$k]=count($v);
+                            $v = null;
+                        }
                     }
                     unset($v);
-                    $x = array_filter($x);
+                    $x = array_filter($y+$x);
                     $x['Amem'] = memory_get_usage();
+                    $x['APeak'] = memory_get_peak_usage();
+                    if (isset($x['nbPushed1'])) {
+                        $x['Delta'] = $x['nbPushed1'] - $x['nbConsumed1'];
+                    }
                     if (isset($x['beforemem'])) {
                         $x['freed'] = $x['beforemem'] - $x['Amem'];
                     }
-                    if (!$x['free']) $x['free'] = [];
-                    $x['nbFree'] = count($x['free']);
                     $x['time'] = $_ENV['gt'];
                     $x['Atime'] = $x['lastSent'] - $x['firstMessage'];
                     unset($x['participants'], $x['p2h'], $x['sentAsapToFd'], $x['messagesSentToFdOnBackground']);//dont care ... no care,
-                    $this->sendOrDisconnect($sender, $x, 1,'dump',false);
-                    return;
+                    return $this->sendOrDisconnect($sender, $x, 1,'dump',false);
                 }
+
+                return $this->sendOrDisconnect($sender, ['what'=>1]);
             }
 
             if (isset($j['rk'])) {
-                $this->sendOrDisconnect($sender, $this->rgg($j['rk']));
-                return;
+                return $this->sendOrDisconnect($sender, $this->rgg($j['rk']));
             }
 
             if (isset($j['get'])) {
@@ -1101,7 +1134,7 @@ $a=1;
             if (isset($j['suscribe'])) {
                 $topics = $j['suscribe'];
                 if (!is_array($topics)) $topics = [$topics];
-                $this->rep($sender, $frame);
+                $this->rep($sender);
                 $this->r()->set('lastSub', time());
                 foreach ($topics as $topic) {
                     $this->add('suscribers:' . $topic, $this->pid . ',' . $sender);
@@ -1110,7 +1143,7 @@ $a=1;
                 }
                 return;
             } elseif (isset($j['unsuscribe'])) {
-                $this->rep($sender, $frame);
+                $this->rep($sender);
                 $topics = $j['unsuscribe'];
                 if (!is_array($topics)) $topics = [$topics];
                 foreach ($topics as $topic) {
@@ -1120,7 +1153,7 @@ $a=1;
                 }
                 return;
             } elseif (isset($j['dropAll'])) {
-                $this->rep($sender, $frame);
+                $this->rep($sender);
                 $topics = $this->fd2sub[$sender];
                 foreach ($topics as $topic) {
                     $this->rem('suscribers:' . $topic, $this->pid . ',' . $sender);
@@ -1147,7 +1180,7 @@ $a=1;
                     $this->r()->incr('nbPushed');
                     $a = 1;
                     $s++;
-                    $ack = hash('crc32c', $j['message']);
+                    $ack = 1;//hash('crc32c', $j['message']);
                     $this->sendOrDisconnect($sender, $ack);#aka:ack
 
 if('croiser les libres et ceux qui sont abonnés'){
@@ -1217,14 +1250,14 @@ if('croiser les libres et ceux qui sont abonnés'){
             if (isset($j['status'])) {
                 $a = 1;
                 if ($j['status'] == 'free') {
-                    $this->rep($sender, $frame);
+                    $this->rep($sender);
                     $sent = $this->shallSend2Free($himself, $sender);// Sends message to first available consumer and maintains him "busy"
                     if (!$sent) {
                         $this->free($this->pid . ',' . $sender, $sender);
                     }
                     return;
                 } else {//busy
-                    $this->rep($sender, $frame);
+                    $this->rep($sender);
                     $this->busy($this->pid . ',' . $sender, $sender);
                     return;
                 }
@@ -1238,8 +1271,9 @@ if('croiser les libres et ceux qui sont abonnés'){
             }
 
             if (!$s) {
-                $this->rep($sender, $frame);
+                $this->rep($sender, ['noacktosendfor' => $j]);
             }
+
             if (!$a) {//auth,list,sub,count,hb,push,broadcast
                 $this->sendOrDisconnect($sender, json_encode(['err' => 'json not valid']));
                 $this->r()->incr('sNotUnder');
@@ -1249,6 +1283,7 @@ if('croiser les libres et ceux qui sont abonnés'){
             }
         } else {
             $this->sendOrDisconnect($sender, json_encode(['err' => 'not json']));
+            //$this->r()->rpush('notjson',$frame->data);
             $this->r()->incr('sNotJson');
             $this->db(',' . $this->uuid . ",message not json");
         }
@@ -1264,7 +1299,7 @@ if('croiser les libres et ceux qui sont abonnés'){
             $suscribedTo = $this->r()->lrange('pid2sub:' . $himself, 0, -1);
             if ($suscribedTo) {
                 $this->db('free: ' . $himself . ' is suscribedTo:' . implode(',', $suscribedTo), 0);
-                foreach ($suscribedTo as $topic) {					
+                foreach ($suscribedTo as $topic) {
 					foreach ($priorities as $priority) {
 						if($this->r()->exists('pending:' . $topic . ':' . $priority) and $this->r()->llen('pending:' . $topic . ':' . $priority)){
 							if ($this->shallSendMessageToClient($sender, $topic, 'free',[$priority])) {
@@ -1302,12 +1337,12 @@ if('croiser les libres et ceux qui sont abonnés'){
 
     function add($k, $v)
     {
-        $this->r()->rPush($k, $v);
+        return $this->r()->rPushUnique($k, $v);
     }
 
     function rem($k, $v)
     {
-        $this->ato()->lrem($k, $v);
+        return $this->ato()->lrem($k, $v);
     }
 
     function add2($mem, $k, $v, $col = 'v')
