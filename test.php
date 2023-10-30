@@ -1,13 +1,44 @@
 <?php
-$to = 10;//read timeout does the whole difference
+chdir(__dir__);
+require_once 'common.php';// todo : use a lightweighter websocket client ?
+if('variables'){
+    $rl = false;
+    $concurrency = 100;
+    $to = 200;//read timeout does the whole difference
+    $host = '127.0.0.1';
+    $port = 2000;
+    $nb = 3;
+    $total = 9;
+    $retries=30;
+    $act=null;
+    $supAdmin='zyx';
+//echo "\n$pid => $nb :$pushes:$receives:$host:$port";//.implode(' ',$z);
+}
+
+extract(argv());//die($host);
+
+if($rl and 'concurrent tasks limiter using touch upon ramdisk') {
+    $f = $rl . getmypid() . '.pid';
+    touch($f);//die($f);
+    register_shutdown_function(function () use ($f) {
+        unlink($f);
+    });
+    if (0) {
+        $tot = glob($rl . '*.pid');//    ls /Volumes/RAMDisk/pids/*.pid 2>/dev/null | wc -l | trim
+        while ($tot > 200) {// Petit délayeur ...
+            sleep(1);
+            $tot = glob($rl . '*.pid');
+        }
+    }
+}
+
 /*
 Coroutine http client
 pecl install swoole
 // ps -ax|grep max4|grep -v grep|wc -l
 pk test; nb=4; for((i=0;i<$nb;++i)) do php $bf/Shiva/test.php $spo $i $nb & done;
  */
-chdir(__dir__);
-require_once 'common.php';// todo : use a lightweighter websocket client ?
+
 ini_set('display_errors', 1);
 $cli = $_ENV['cli'] = 0;
 
@@ -24,7 +55,6 @@ Co::Run(function(){
 })
 */
 //use OpenSwoole\Coroutine as Co;// but rest of swoole Objects are ok /):
-$supAdmin='zyx';
 $pushAndPull = ['ya' => 'yo', 'yi' => 'yu', 'yo' => 'yi', 'yu' => 'ya'];// ya and yi queue are stored to memory and disk ..
 $pushes1=array_keys($pushAndPull);
 $consumes1=array_values($pushAndPull);
@@ -35,25 +65,23 @@ $heartbeatsEachNSeconds=30;
 $pid = getmypid();
 $expectedRepliesNb=$errorExitCode = 69;
 $okExitCode = 1;
-$conerr = $err = $tentative = $hearbeats = $nb = $total = $fini = $finalOk = $b = $waits = $exit = $e = $tentative = $nbReplies = $cli = 0;
+$crashed=$conerr = $err = $tentative = $hearbeats = $nb = $total = $fini = $finalOk = $b = $waits = $exit = $e = $tentative = $nbReplies = $cli = 0;
 $log=[];
 
-if('variables'){
-    $host = '127.0.0.1';
-    $port = 2000;
-    $nb = 3;
-    $total = 9;
-    extract(argv());
-//echo "\n$pid => $nb :$pushes:$receives:$host:$port";//.implode(' ',$z);
-}
 
 try{
-    if (in_array($argv[1], ['test', 'restart', 'dump', 'reset', 'xdebug'])) {
-        $action = $argv[1];
+    if (in_array($act, ['test', 'restart', 'dump', 'reset', 'xdebug'])) {
         $port = 2000;
-        $success = Co::Run(function () use ($supAdmin, $host, $action, $port, $to, $cli) {
-            push(['supAdmin' => $supAdmin, $action => 1]);
-            $res = read2($action);
+        $success = Co::Run(function () use ($supAdmin, $host, $act, $port, $to, $cli) {
+			$ok=false;
+			//while(!$ok){
+				try {
+					push(['supAdmin' => $supAdmin, $act => 1]);
+					$ok=$res = read2($act);
+				}catch(\Throwable $e){
+					$res='{"exception":'.$e->getMessage().'}';
+				}
+			//}
             echo $res."\n";
             return;
             $log = [$res];
@@ -76,12 +104,13 @@ try{
         if (strpos($a, 'MessagContains') === false and 'wrap it once again') {
             return false;
         }
-        $dialog[] = ['incr' => 'gotMsg'];
+        //$dialog[] = ['incr' => 'gotMsg'];
         $a = "$pid:read:" . substr($a,0,60);
         //echo "\n\t$a";
         return $a;
     };
 
+// Upon failure, en pousserait trop ..
     $dialog = [
         'todisk, second position cuz older message' => ['push' => $pushes, 'message' => '-' . $pushes . ',disk:1,older,order:2,prio1,todisk,MessagContains:' . $pid . '-' . uniqid() . str_repeat('-', 4096)],
         'push' => ['push' => $pushes, 'message' => '-' . $pushes . ',order:3,noprio:1,MessagContains:' . $pid . '-' . uniqid()],
@@ -90,6 +119,12 @@ try{
     ];
 
     $dialog2 = [
+			['transaction' => [
+				['suscribe' => $consumes], 	['free' => 1], 	['data' => ['keepalive' => 1], 'cb' => $cb],  ['pushonly'=>['incr'=>'nbConsumed1','by'=>1]]
+			],
+		]
+	];
+    $dialog3=[
 // gets : prio 3 ; 'consume' => ['data' => ['consume'=>$consumes], 'cb' => $cb],
         ['subscribe'=>'&consume:1','transaction'=>[
                 'suscribe:'.$consumes => ['suscribe' => $consumes], 'free' => ['free' => 1],'wait' => ['data' => ['keepalive' => 1], 'cb' => $cb],//gets prio 3
@@ -106,43 +141,48 @@ try{
     ];
 
     $sucess=false;$tries=0;
-    while(!$sucess && $tries<3 and 'dialog1:pushes'){
+    while( ! $sucess && $tries<$retries and 'dialog1:pushes'){
         $s1 = Co::Run(function () {
-            global $sucess, $dialog,$err, $cli;//$try, , $log, $cli, $pid, $pushes, $consumes;
+            global $sucess, $dialog,$err,$log,$cli;//$try, , $log, $cli, $pid, $pushes, $consumes;
             $sucess = false;
             try{
-                $sucess = process($dialog);
+                $sucess = process($dialog,0,5,true);
             }catch(\Exception $e){
-                $sucess = false;
-                echo',loop1:'.$e->getMessage();
-                if($cli){$cli->close();unset($cli);}
+                $sucess = false;$crashed=true;
+                echo',pushLoop1:'.$e->getMessage();
+                if($cli){$cli->close();unset($cli);sleep(1);}
             }
             return $sucess;
         });
 
-        if(!$sucess){$err=0;$tries++;echo"\nTry:$tries";}
+        if(!$sucess){$err=0;$tries++;echo"\nPushLoop1Try:$tries:".json_encode($log);$log=[];}
         else echo '.';
     }//end while no success
 
-    $sucess=false;$tries=0;
-    while(!$sucess && $tries<3 and 'dialog2:consumes'){
-        $s2 = Co::Run(function () {
-            global $sucess,$dialog2,$err, $cli;//$try, , $log, $cli, $pid, $pushes, $consumes;
-            $sucess = false;
-            try{
-                $sucess = process($dialog2);
-                if($sucess && $cli){$cli->close();unset($cli);}// then closes it, maybe, later
-            }catch(\Exception $e){
+// Then consumes ...
+if($cli){$cli->close();$cli=null;}// Keep cli connection ? Nope, invalid between 2 co::Run
+    $i=0;
+    while($i<3){// repeat 3 times
+        $sucess=false;$tries=0;$i++;
+        while(!$sucess && $tries<$retries and 'dialog2:consumes'){
+            $s2 = Co::Run(function () {
+                global $i,$pid,$sucess,$dialog2,$err,$log,$cli;//$try, , $log, $cli, $pid, $pushes, $consumes;
                 $sucess = false;
-                echo',loop2:'.$e->getMessage();
-                if($cli){$cli->close();unset($cli);}
-            }
-            return $sucess;
-        });
+                try{
+                    $sucess = process($dialog2);
+                    if($sucess && $cli){$cli->close();unset($cli);}// then closes it, maybe, later
+                }catch(\Exception $e){
+                    $sucess = false;
+                    echo',loop2:'.$e->getMessage();
+                    if($cli){$cli->close();unset($cli);sleep(1);}
+                }
+                return $sucess;
+            });
 
-        if(!$sucess){$err=0;$tries++;echo"\nTry2:$tries,";}
-        else echo "\n".$pid.'='.$sucess;
-    }//end while no success
+            if(!$sucess){$err=0;$tries++;echo"\nConsoLoop2:try:$pid#$i,$tries".json_encode($log);$log=[];}// =1 ?? =true tostring surtout
+            else echo '.';//"\n".$pid.'='.$s2;
+        }//end while no success
+    }
 
 //  ps -ax|grep test.php
 
@@ -165,10 +205,13 @@ function e($x){
     $a=$x;echo','.$x;
 }
 
-function process($dialog, $depth = 0, $maxTries = 3)
+function process($dialog, $depth = 0, $maxTries = 3, $resume = false)
 {
-    global $log, $err;
+    global $log, $err, $lastkey, $crashed;
     foreach ($dialog as $k => $v) {
+		if($crashed && $resume && $lastkey && $k!=$lastkey)continue;
+		if($crashed && $resume && $lastkey){echo"\nresumed at $lastkey";$crashed=false;}//recover at this precise point
+		$lastkey=$k;
         $tries = 0;
         $recv = $ok = false;
         while (!$ok) {
@@ -268,7 +311,7 @@ function read2($reason = '', $nbRetries = 0, $essai = 0, $connectOnly =false)
         if ($cli->errCode) {
             $conerr++;
             $err = 99;
-            echo $GLOBALS['pid'].':99,';
+            //echo $GLOBALS['pid'].':99,';
             throw new \conExc('a99');
             //throw new Exception('e'.$cli->errCode.':'.$cli->errMsg);//errCode
         }
@@ -305,6 +348,8 @@ function db($x, $fn = '../3.log')
     fpc($fn, "\nC:" . $y . ':' . $x, 8);
 }
 
+class conExc extends \Exception{}
+
 class redisFaker
 {
     function __call($method, $args)
@@ -318,7 +363,6 @@ function fpc($f, $d, $fla = null)
     echo "\n" . trim($d);
 }
 
-class conExc extends \Exception{}
 
 //
 return; ?>

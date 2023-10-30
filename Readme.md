@@ -1,6 +1,39 @@
-<img href='#' src='http://1.x24.fr/a/shiva1.webp?a#bird.png' style='max-width:5vw;margin:0 1rem 0.1rem 0' align='left'/> Shiva : Fast Php Message Queue
+<img href='#' src='http://1.x24.fr/a/shiva1.webp?a#bird.png' style='max-width:5vw;margin:0 1rem 0.1rem 0' align='left'/> Shiva : Fast Php Message Queue Server ( as fast as Nats ? )
 ---
 <hr>
+
+Monitor the console for running 4000 successive clients pushing 3 messages, consuming 3 messages ( + 1 disk based ), 12000 messages then ..
+
+> docker run -p 2000:2000 alptech/yuzu:shiva2
+
+Then run the tests using simple php ( can also set a concurrent task limiter here ... some connections might break or retry depending on the server usage, so thats why the rate limiter is a good idea here .. )
+
+> nb=4001;
+echo '' > test.log; pk test.php;  
+for((i=1;i<$nb;++i)) do php  -dextension= openswoole.so test.php host=$dockerHost port=2000 nb=$i total=$nb to=$to & done;
+
+Using rate limiter ( better results, if it crashes or hangs, reduce 21 and 19 to lower values )
+
+
+> rl=/Volumes/RAMDisk/pids/; # your ramdisk location in order to rate limit processes .. 
+>
+>nb=4001;  echo '' > test.log; pk test.php;find $rl -type f -delete;
+>
+>for((i=1;i<$nb;++i)) do
+> 
+>  m=$(($i % 21)); if [ $m -gt 19 ]; then n=`ls $rl*.pid 2>/dev/null | wc -l | trim`; while [ $n -gt 19 ]; do sleep 2; n=`ls $rl*.pid 2>/dev/null | wc -l | trim`;done;fi;
+> 
+> sleep 0.3; php  -dextension= openswoole.so test.php rl=$rl host=$dockerHost port=2000 nb=$i total=$nb to=$to &
+>
+> done;
+
+
+envs: supAdmin=zyx, reaktors=1, workers=1, port=2000, log=0,needAuth=0,pass=0
+
+
+
+
+
 
 1) <pre>docker run --name shiva --rm -p 82:82 -p 2000:2000 -e portweb=82 -e port=2000 -e reaktors=1 -e workers=1 -e pass='{"b":"c"}' -e needAuth=0 -e log=0 -e pvc=/pvc -v `pwd`:/pvc -ti docker.io/alptech/yuzu:shiva</pre>
 

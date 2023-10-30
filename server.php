@@ -1,4 +1,5 @@
 <?php
+$maxConn = 120;// Trop de spawns, ne peut pas gérer toutes ces connections .., fin de la commande de tick peut utiliser trop  ne pas limiter semble tuer ces dernières, chose 245:max ,après pête aux alentours de >220
 
 use Swoole\Table;
 use Swoole\Timer;
@@ -7,7 +8,7 @@ use Swoole\Server\Task;
 use Swoole\Websocket\Server;
 use Swoole\Coroutine\Channel;
 /*
- Cant access channel between workers ...
+ Cant access channel between workers ... Might be killed upon segmentation fault on too much usage .. Segmentation fault: 11
  */
 function anomaly()
 {
@@ -21,7 +22,7 @@ $maxSuscribersPerChannel = 300;//$_ENV['subPerChannel'] ?? 200;
 $bigMsgToDisk=4096;
 $supAdmin = $debug = 0;
 $tick = 20000000;// tick each 20 sec :: backup tables to disk
-$maxConn = $backlog = 12000;
+$backlog = 12000;
 $swooleTableStringMaxSize = $listTableNbMaxSize = 9000;// participants, suscribers, free, pending: => intercepted to channel on rpush
 
 $listTableNb = 900;// nb max de chaines
@@ -514,7 +515,7 @@ $sw = new wsServer($port, $options, $needAuth, $tokenHashFun, $pass, $log, $time
 
 class wsServer
 {
-    public $memlimit, $log, $timer, $tokenHashFun, $server, $ato, $redis, $bgProcessing = false, $needAuth = false, $uuid = 0, $parentPid = 0, $pid = 0, $pendings = 0, $port = 0, $tick = 20000000, $options = [], $passworts = [], $frees = [], $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [];// 20 sec in microseconds here for heartbeat:: keep connection alive
+    public $lastAct, $memlimit, $log, $timer, $tokenHashFun, $server, $ato, $redis, $bgProcessing = false, $needAuth = false, $uuid = 0, $parentPid = 0, $pid = 0, $pendings = 0, $port = 0, $tick = 20000000, $options = [], $passworts = [], $frees = [], $conn = [], $clients = [], $fdIs = [], $h2iam = [], $pool = [], $fd2sub = [], $auths = [], $ticks = [];// 20 sec in microseconds here for heartbeat:: keep connection alive
 
     public function shallRestart()
     {// return false;
@@ -577,20 +578,57 @@ class wsServer
     }
 
     /* async function */
+    function debug1(){
+        static $last;
+        if(time()==$last)return;
+        $last=time();
+        $x=[
+            'c'=>$this->r()->get('nbBgProcessing'),
+            'time' => $this->r()->get('lastSent') - $this->r()->get('firstPush'),
+            '+'=>$this->r()->get('nbPushed1'),// 3*1200 = 3600 : toutes envoyées, Delta 0 au final = scénario complet
+            '-'=>$this->r()->get('nbConsumed1'),
+            'pending'=>$this->r()->get('nbPending'),
+            'delta'=>$this->r()->get('nbPushed1')-$this->r()->get('nbConsumed1'),
+
+            'mem'=>memory_get_usage(),// ne parvient pas à les enregistrer comme "libres", car busyied ?
+            //'free'=>count($free),//'nbFreed'=>$this->r()->get('nbFreed'),
+            'maxcon'=>$this->r()->get('maxCon'),
+
+            'actives'=>$this->r()->get('nbConnectionsActives'),
+            'decos'=>$this->r()->get('decoSuccessives'),
+
+        ];
+        echo"\n".json_encode($x);
+
+    }
     function processNbPendingInBackground($via = 0)
     {
         global $pvc;
         if ($this->bgProcessing) {
-            $this->r()->incr('nbBgpLocks', 1);
+            $this->r()->incr('nbBgpLocks', 1);echo':';
             return;
         }
-
         $this->bgProcessing = __line__;
-        $this->r()->incr('nbBgProcessing');
+        if(!$this->r()->get('nbPending')){	echo',';
+			$this->bgProcessing = false;return;
+		}
+
+		$this->r()->incr('nbBgProcessing');
+
+
+		$free = $this->r()->get('free');//frees;
+
+        $this->debug1();
+
+        if (!count($free)) {echo';';
+            $this->bgProcessing = false;return;
+        }
+
+
         $now = time();
 
-        if ($_ENV['timeToBackup'] and $this->r()->get('lastBackup') < ($now - $_ENV['timeToBackup'])) {
-            $this->r()->set('lastBackup', $now);
+        if (0 and ($_ENV['timeToBackup'] and $this->r()->get('lastBackup') < ($now - $_ENV['timeToBackup']))) {
+            echo"\nBackupin..";$this->r()->set('lastBackup', $now);
             $x = $this->r()->dump();
             foreach ($x as $k => &$v) {
                 if (substr($k, 0, 4) == 'pid2') $v = null;
@@ -606,34 +644,24 @@ class wsServer
             file_put_contents('backup.json', json_encode($x));
         }
 
-        //$this->bgProcessing = false;
 
-        $this->shallRestart();
+        // $this->bgProcessing = false;
+        // $this->shallRestart();
 
-
-        $free = $this->r()->get('free');//frees;
-        if (!$free) {
-            $this->bgProcessing = false;return;
-        }
-        if (!$this->r()->get('nbPending')) {
-            $this->bgProcessing = false;return;
-        }
-
-        //$this->bgProcessing = __line__;
-
-
-        //  $this->db('pg', 1);
-        //  echo "\nBgProcessFree:".count($free).'/pen'.$this->r()->get('nbPending');
-
+//   $this->bgProcessing = __line__;
+//  $this->db('pg', 1);
+//  echo "\nBgProcessFree:".count($free).'/pen'.$this->r()->get('nbPending');
+$sent=0;
         foreach ($free as $fd) {
             if (isset($this->fd2sub[$fd]) and $this->fd2sub[$fd]) {// channel souscrit par chacun des processus libres ...
                 foreach ($this->fd2sub[$fd] as $sub) {
                     if ($this->shallSendMessageToClient($fd, $sub, 'AsyncPendingMessagesSentToFdOnBackground')) {
-                        break;// stop cycling subject, the client is busy consuming ressource
+                        $sent++;break;// stop cycling subject, the client is busy consuming ressource
                     }
                 }
             }
         }
+        //echo'£'.$sent;
         $this->bgProcessing = false;// Todo :: Each individual worker shall care of it's own pending queues
         return;
     }
@@ -860,10 +888,19 @@ $a=1;
 
     function onClose($server, $fd)
     {
+        if(!in_array($fd,$this->pool)){return;/* unregistered .. simple connection failure ?*/}else{//[] = $req->fd;
+            //  has $fd ever been opened ?
+            if($this->lastAct == 'onclose'){
+                $this->r()->incr('decoSuccessives');
+            }else{
+                $this->r()->set('decoSuccessives',0);
+            }
+            $this->r()->decr('nbConnectionsActives');
+            $this->pool = array_diff($this->pool, [$fd]);
+        }
+        $this->lastAct = 'onclose';
         //$server->on('close', function ($server, $fd) {
-        $this->r()->decr('nbConnectionsActives');
         $this->r()->incr('nbClosed');//nbOpened,nbClosed,serverError,sMessage
-        $this->pool = array_diff($this->pool, [$fd]);
         $himself = $this->pid . ',' . $fd;
         if (isset($this->h2iam[$himself])) {
             $iam = $this->h2iam[$himself];
@@ -887,6 +924,7 @@ $a=1;
     function onMessage($server, $frame)
     {
         global $maxMemUsageMsgToDisk, $pvc, $nbPriorities, $bigMsgToDisk,$supAdmin;
+        $this->lastAct = 'onmessage';
         $this->r()->setIfNull('firstMessage', time());
         $this->r()->incr('nbMessages');
         $sender = $frame->fd;
@@ -1132,9 +1170,9 @@ $a=1;
             if (isset($j['subscribe'])) $j['suscribe'] = $j['subscribe'];
 
             if (isset($j['suscribe'])) {
+				$this->rep($sender);
                 $topics = $j['suscribe'];
                 if (!is_array($topics)) $topics = [$topics];
-                $this->rep($sender);
                 $this->r()->set('lastSub', time());
                 foreach ($topics as $topic) {
                     $this->add('suscribers:' . $topic, $this->pid . ',' . $sender);
@@ -1250,7 +1288,7 @@ if('croiser les libres et ceux qui sont abonnés'){
             if (isset($j['status'])) {
                 $a = 1;
                 if ($j['status'] == 'free') {
-                    $this->rep($sender);
+                    $this->rep($sender);// rep ok, then waits
                     $sent = $this->shallSend2Free($himself, $sender);// Sends message to first available consumer and maintains him "busy"
                     if (!$sent) {
                         $this->free($this->pid . ',' . $sender, $sender);
@@ -1542,6 +1580,11 @@ if(0 and !isset($_ENV['channels'])){// Why : Seems to crash
                 }
                 //$this->childProcess('open');
                 $this->r()->incr('nbConnectionsActives');//nbOpened,nbClosed,serverError,sMessage
+                if ($this->r()->get('nbConnectionsActives') > $this->r()->get('maxCon')) {
+                    $this->r()->set('maxCon', $this->r()->get('nbConnectionsActives'));
+                    //nbOpened,nbClosed,serverError,sMessage
+                }
+
                 $this->r()->incr('nbOpened');//nbOpened,nbClosed,serverError,sMessage
                 $this->ato()->rpush('participants', $this->pid . ',' . $req->fd);
                 $this->pool[] = $req->fd;
@@ -1550,13 +1593,16 @@ if(0 and !isset($_ENV['channels'])){// Why : Seems to crash
                     $a = round((microtime(true) * 1000) - $a);
                     if ($a > 100) echo "\n" . $a;
                 }// todo: connection took too much fucking time
+
+                $this->debug1();
+
                 //echo "\n" . '{"pid":' . $this->pid . ',"id":' . $req->fd . '}';
                 $this->sendOrDisconnect($req->fd, ['pid'=>$this->pid,'id'=>$req->fd], 1,'pid');//so he knows who he actually is
             });
 
 
             $server->on('start', function (Server $server) use ($port) { // Le serveur uniquement, pas les workersn, espace pour caller les globales vit fait
-                echo "\nss:" . getmypid();
+                echo "\nServerOnStart:" . getmypid();
 
                 global $channels2start, $nbPriorities, $swooleTableStringMaxSize, $nbReferences, $nbChannels, $nbAtomics, $nbWorkers, $capacityMessagesPerChannel, $binSize, $nbWorkers, $listTableNb, $listTableNbMaxSize;
                 //$this->r()->incr('sStart');//nbOpened,nbClosed,serverError,sMessage,sStart
